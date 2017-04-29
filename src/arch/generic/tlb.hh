@@ -111,6 +111,10 @@ class BaseTLB : public SimObject
          * has been squashed.
          * @ return Is the instruction that requested this translation squashed?
          */
+        virtual void triggerPTW(uint8_t keep,Addr paddr)
+        { 
+        	std::cout<<"here do't implenment"<<std::endl;
+		}
         virtual bool squashed() const { return false; }
     };
 };

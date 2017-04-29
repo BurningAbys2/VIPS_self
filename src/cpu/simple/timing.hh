@@ -55,6 +55,8 @@ class TimingSimpleCPU : public BaseSimpleCPU
     virtual ~TimingSimpleCPU();
 
     virtual void init();
+	//@hxm
+	uint8_t TlbTriggerflag; 
 
   private:
 
@@ -128,6 +130,18 @@ class TimingSimpleCPU : public BaseSimpleCPU
         {
             cpu->sendFetch(fault, req, tc);
         }
+		/************************************************************
+		 *AUTHOR:     by @hxm 
+		 *FUNCTIHON:  1)called in pagetable_walke
+		 *			  2)using for transtionn from private to share
+		 *TIME:		  2017/04/17
+		 ************************************************************/
+		void 
+		triggerPTW(uint8_t keep,Addr paddr)
+        { 
+        	cpu->triggerPTWitb(keep,paddr);
+		}
+		
     };
     FetchTranslation fetchTranslation;
 
@@ -263,9 +277,19 @@ class TimingSimpleCPU : public BaseSimpleCPU
     PacketPtr ifetch_pkt;
     PacketPtr dcache_pkt;
 	PacketPtr rcache_pkt;
-
+	//@hxm save scene
+    RequestPtr itbfetch_req;
+	RequestPtr dtbdata_req;
     Cycles previousCycle;
 
+	//for read and mem
+	uint8_t *trigmemdata;
+	uint8_t *trigmemreaddata;
+	unsigned trigmemsize;
+	Addr trigmemaddr;
+	unsigned trigmemflags;
+	uint64_t *trigmemres;
+	
   protected:
 
      /** Return a reference to the data port. */
@@ -295,6 +319,11 @@ class TimingSimpleCPU : public BaseSimpleCPU
     void fetch();
     void sendFetch(const Fault &fault, RequestPtr req, ThreadContext *tc);
 	//@hxm********************************************************************
+	void triggerPTWitb(uint8_t keep,Addr paddr);
+	void triggerPTWdtb(WholeTranslationState *state,uint8_t keep,Addr paddr);
+	void triggerITB();
+	void triggerDTBread();	
+    void triggerDTBwrite();	
     void triggerFetch();
 	void finishtransition(PacketPtr pkt);
     void buildtransition(void);

@@ -262,7 +262,7 @@ Device::read(PacketPtr pkt)
     // clearing it
     if (raddr == Regs::IntrStatus)
         devIntrClear();
-
+    std::cout<<"In Sinic leave Device::write."<<std::endl;
     return pioDelay;
 }
 
@@ -302,6 +302,7 @@ Device::iprRead(Addr daddr, int cpu, uint64_t &result)
 Tick
 Device::write(PacketPtr pkt)
 {
+    std::cout<<"In Sinic enter Device::write."<<std::endl;
     assert(config.command & PCI_CMD_MSE);
     assert(pkt->getAddr() >= BARAddrs[0] && pkt->getSize() < BARSize[0]);
 
@@ -423,7 +424,7 @@ Device::write(PacketPtr pkt)
         }
         break;
     }
-
+    std::cout<<"In Sinic leave Device::write."<<std::endl;
     return pioDelay;
 }
 

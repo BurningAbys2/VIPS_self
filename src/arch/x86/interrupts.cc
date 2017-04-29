@@ -369,17 +369,30 @@ X86ISA::Interrupts::recvMessage(PacketPtr pkt)
 				recvAddr = pkt->get<Addr>();
 				switch(recvAddr){
 					case 1:
-						std::cout<<"in interrupt recvMessage enter cpu triggerFetch"<<std::endl;
+						std::cout<<"interrupt recvMessage cpu triggerFetch"<<std::endl;
 						cpu->triggerFetch();
 						break;
 					case 2:
-						std::cout<<"in interrupt recvMessage enter cpu triggerWritePacket"<<std::endl;
+						std::cout<<"interrupt recvMessage cpu triggerWritePacket"<<std::endl;
 						cpu->triggerWritePacket();
 						break;
 					case 3:
-						std::cout<<"in interrupt recvMessage enter cpu triggerReadPacket"<<std::endl;
+						std::cout<<"interrupt recvMessage cpu triggerReadPacket"<<std::endl;
 						cpu->triggerReadPacket();
 						break;
+					case 4:
+					    std::cout<<"interrupt recvMessage cpu triggerITB"<<std::endl;
+						cpu->triggerITB();
+						break;
+					case 5:
+						std::cout<<"interrupt recvMessage cpu triggerDTB write"<<std::endl;
+						cpu->triggerDTBwrite();
+						break;
+					case 6:
+						std::cout<<"interrupt recvMessage cpu triggerDTB read"<<std::endl;
+						cpu->triggerDTBread();
+						break;
+
 					default:
 						if(pendingTransition == false){
 							pendingNum = 0;

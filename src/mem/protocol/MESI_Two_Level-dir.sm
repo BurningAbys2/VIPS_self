@@ -46,9 +46,11 @@ machine(Directory, "MESI Two Level directory protocol")
     ID_W, AccessPermission:Busy, desc="Intermediate state for DMA_WRITE when in I";
     IWT,AccessPermission:Busy,desc="Intermediate state for L2 writeback";
 	
-	M, AccessPermission:Maybe_Stale, desc="memory copy may be stale, i.e. other modified copies may exist";
+	M, AccessPermission:Read_Write, desc="maybe data in cache";
+	
+	I_W, AccessPermission:Busy, desc="no data in cache,so reciew DMA write request";
 	IM, AccessPermission:Busy, desc="Intermediate State I>M";
-    MI, AccessPermission:Busy, desc="Intermediate State M>I";
+    I_R, AccessPermission:Busy, desc="no dato in cache,so reciew DMA read request";
 	M_DRD, AccessPermission:Busy, desc="Intermediate State when there is a dma read";
     M_DRDI, AccessPermission:Busy, desc="Intermediate State when there is a dma read";
     M_DWR, AccessPermission:Busy, desc="Intermediate State when there is a dma write";
@@ -63,9 +65,11 @@ machine(Directory, "MESI Two Level directory protocol")
     Memory_Ack, desc="Writeback Ack from memory arrives";
 //added by SS for dma
     DMA_READ, desc="A DMA Read memory request";
+	DMA_READ_clean,desc="A DMA Read memory request,no data in cache";
     DMA_WRITE, desc="A DMA Write memory request";
+	DMA_WRITE_clean,desc="A DMA Write memory request,no data in cache";
     CleanReplacement, desc="Clean Replacement in L2 cache";
-
+	Data_Dma,desc="invalidate data for DMA in L2 cache";
   }
 
   // TYPES
@@ -196,11 +200,21 @@ machine(Directory, "MESI Two Level directory protocol")
         if (isGETRequest(in_msg.Type)) {
           trigger(Event:Fetch, in_msg.Addr, TBEs[in_msg.Addr]);
         } else if (in_msg.Type == CoherenceRequestType:DMA_READ) {
-          trigger(Event:DMA_READ, makeLineAddress(in_msg.Addr),
-                  TBEs[makeLineAddress(in_msg.Addr)]);
+		  if (directory.isPresent(in_msg.Addr)){
+			  trigger(Event:DMA_READ, makeLineAddress(in_msg.Addr),
+					  TBEs[makeLineAddress(in_msg.Addr)]);
+		  }else{
+			  trigger(Event:DMA_READ_clean, makeLineAddress(in_msg.Addr),
+					  TBEs[makeLineAddress(in_msg.Addr)]);
+		  }
         } else if (in_msg.Type == CoherenceRequestType:DMA_WRITE) {
-          trigger(Event:DMA_WRITE, makeLineAddress(in_msg.Addr),
-                  TBEs[makeLineAddress(in_msg.Addr)]);
+		  if (directory.isPresent(in_msg.Addr)){
+			  trigger(Event:DMA_WRITE, makeLineAddress(in_msg.Addr),
+					  TBEs[makeLineAddress(in_msg.Addr)]);
+		  }else{
+			  trigger(Event:DMA_WRITE_clean, makeLineAddress(in_msg.Addr),
+					  TBEs[makeLineAddress(in_msg.Addr)]);		  
+		  }
         } else {
           DPRINTF(RubySlicc, "%s\n", in_msg);
           error("Invalid message");
@@ -215,6 +229,8 @@ machine(Directory, "MESI Two Level directory protocol")
         assert(in_msg.Destination.isElement(machineID));
         if (in_msg.Type == CoherenceResponseType:MEMORY_DATA) {
           trigger(Event:Data, in_msg.Addr, TBEs[in_msg.Addr]);
+        }if (in_msg.Type == CoherenceResponseType:DMA_DATA) {
+          trigger(Event:Data_Dma, in_msg.Addr, TBEs[in_msg.Addr]);
         } else if (in_msg.Type == CoherenceResponseType:ACK) {
           trigger(Event:CleanReplacement, in_msg.Addr, TBEs[in_msg.Addr]);
         } else {
@@ -320,7 +336,13 @@ machine(Directory, "MESI Two Level directory protocol")
       queueMemoryRead(in_msg.Requestor, address, to_mem_ctrl_latency);
     }
   }
-
+//added by @hxm 
+  action(dqf_queueMemoryFetchRequestDMA, "dqfd", desc="Queue off-chip fetch request") {
+	//peek(requestNetwork_in, RequestMsg) 
+    peek(responseNetwork_in, ResponseMsg){
+      queueMemoryRead(in_msg.Sender, address, to_mem_ctrl_latency);
+    }
+  }
   action(p_popIncomingDMARequestQueue, "p", desc="Pop incoming DMA queue") {
     requestNetwork_in.dequeue();
   }
@@ -415,7 +437,7 @@ machine(Directory, "MESI Two Level directory protocol")
  // TRANSITIONS
  //=====================================================
  //for fetch
-  transition(I, Fetch, IM) {
+  transition({I,M}, Fetch, IM) {
     qf_queueMemoryFetchRequest;
     j_popIncomingRequestQueue;
   }
@@ -425,90 +447,92 @@ machine(Directory, "MESI Two Level directory protocol")
     l_popMemQueue;
     kd_wakeUpDependents;
   }
-  //================================================
-  //for L2 replacement clean
-  transition(M, CleanReplacement, I) {
-    a_sendAck;
-    k_popIncomingResponseQueue;
-    kd_wakeUpDependents;
-  }
   //L2 replacement
   transition(M, Data, IWT) {
     qw_queueMemoryWBRequest;
     k_popIncomingResponseQueue;
   }
-  transition(IWT, Memory_Ack,I) { 
+  transition(IWT, Memory_Ack,M) { 
     aa_sendAck;
     l_popMemQueue;
     kd_wakeUpDependents;
   }
 
-  transition({ID, ID_W, IM, IWT}, {Fetch, Data} ) {
+  transition({ID, ID_W, IM, IWT, M_DRD, M_DRDI, M_DWR, M_DWRI}, {Fetch, Data} ) {
     z_stallAndWaitRequest;
   }  
   
- transition({ID, ID_W, IM, IWT}, {DMA_WRITE, DMA_READ} ) {
+ transition({ID, ID_W, IM, IWT, M_DRD, M_DRDI, M_DWR, M_DWRI}, {DMA_WRITE, DMA_READ} ) {
     zz_recycleDMAQueue;
-  }
-//=========================================================   
+  }  
 //=========================================================
-  //for dma support data in memory
-  transition(I, DMA_READ, ID) {
-    qf_queueMemoryFetchRequestDMA;
-    j_popIncomingRequestQueue;
-  }
-  
-  transition(ID, Memory_Data, I) {
-    dr_sendDMAData;
-    l_popMemQueue;
-    kd_wakeUpDependents;
-  }
-  
-  transition(I, DMA_WRITE, ID_W) {
-    qw_queueMemoryWBRequest_partial;
-    j_popIncomingRequestQueue;
-  }
-  
-  transition(ID_W, Memory_Ack, I) {
-    da_sendDMAAck;
-    l_popMemQueue;
-    kd_wakeUpDependents;
-  }
-  //for dma support data in L2
+  //for dma support data READ
   transition(M, DMA_READ, M_DRD) {
     inv_sendCacheInvalidate;
     j_popIncomingRequestQueue;
+  }	  
+  transition(M_DRD,CleanReplacement,ID){//no data in cache,need all Ack
+   	dqf_queueMemoryFetchRequestDMA;//request net
+	k_popIncomingResponseQueue;
+  } 
+  transition(ID, Memory_Data, M) {
+	dr_sendDMAData;//choose distination based address
+	l_popMemQueue;
+	kd_wakeUpDependents;
   }
-
-  transition(M_DRD, Data, M_DRDI) {
-    drp_sendDMAData;
-    qw_queueMemoryWBRequest;
-    k_popIncomingResponseQueue;
+  transition(M_DRD,Data_Dma,M_DRDI){//data in cache
+	drp_sendDMAData;
+	qw_queueMemoryWBRequest;
+	k_popIncomingResponseQueue;
   }
-  
-  transition(M_DRDI, Memory_Ack, I) {
-    aa_sendAck;
+  transition(M_DRDI, Memory_Ack, M) {
+    //w_deallocateTBE;
+	l_popMemQueue;
+	kd_wakeUpDependents;
+  }
+  transition(I, DMA_READ, I_R) {
+    qf_queueMemoryFetchRequestDMA;
+    j_popIncomingRequestQueue;
+  }  
+  transition(I_R, Memory_Data, I) {
+    dr_sendDMAData;
     l_popMemQueue;
     kd_wakeUpDependents;
-  }
-
+  }     
+  //for dma support data WRITE
   transition(M, DMA_WRITE, M_DWR) {
     v_allocateTBE;
     inv_sendCacheInvalidate;
     j_popIncomingRequestQueue;
+  }	
+  transition(M_DWR,CleanReplacement,ID_W){//no data in cache,need all Ack
+	qw_queueMemoryWBRequest_partialTBE;
+	k_popIncomingResponseQueue;
+  } 
+  transition(ID_W, Memory_Ack, M) {
+	da_sendDMAAck;
+    w_deallocateTBE;
+	l_popMemQueue;
+	kd_wakeUpDependents;
   }
-
-  transition(M_DWR, Data, M_DWRI) {
-    qw_queueMemoryWBRequest_partialTBE;
+  transition(M_DWR,Data_Dma,M_DWRI){//data in cache
+	qw_queueMemoryWBRequest_partialTBE;
     k_popIncomingResponseQueue;
   }
-
-  transition(M_DWRI, Memory_Ack, I) {
-    aa_sendAck;
+  transition(M_DWRI,Memory_Ack,M){
     da_sendDMAAck;
     w_deallocateTBE;
     l_popMemQueue;
     kd_wakeUpDependents;
-  } 
+  }
+  transition(I, DMA_WRITE, I_W) {
+    qw_queueMemoryWBRequest_partial;
+    j_popIncomingRequestQueue;
+  }
+  transition(I_W, Memory_Ack, I) {
+    da_sendDMAAck;
+    l_popMemQueue;
+    kd_wakeUpDependents;
+  }  
  //==========================================================  
 }

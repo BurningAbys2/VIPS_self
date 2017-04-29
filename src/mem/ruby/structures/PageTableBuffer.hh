@@ -80,9 +80,10 @@ class PageTableBuffer : public SimObject
 	void recordEntryAddrss(const Address& address, DataBlock& dblk,const MachineID& num,bool pdp);	
 	bool checkEntryAddrss(const Address& address,MachineID& Machinenum);
 	void checkcacheAddress(const Address& address,DataBlock& dblk,const MachineID& Machinenum);
-	bool checkAddress(PacketPtr pkt,uint32_t id);//using in sequence.cc
-	bool checkAddress(const Address& address);//using for DMA in L1 cache
-
+	bool checkAddress(PacketPtr pkt,uint32_t id); //using in sequence.cc
+	bool checkAddress(const Address& address); //using for DMA in L1 cache
+	bool checkPageRequstAddress(PacketPtr pkt,uint32_t id); //using for page table walker requst checking
+	
   private:
     // Private copy constructor and assignment operator
     PageTableBuffer(const PageTableBuffer& obj);

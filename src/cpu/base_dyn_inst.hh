@@ -324,7 +324,9 @@ class BaseDynInst : public ExecContext, public RefCounted
 
     /** Finish a DTB address translation. */
     void finishTranslation(WholeTranslationState *state);
-
+    /**@hxm,for trigger transition*/
+    void triggerPTW(uint8_t keep,uint64_t paddr);
+	void triggerPTWdtb(WholeTranslationState *state,uint8_t keep,uint64_t paddr);
     /** True if the DTB address translation has started. */
     bool translationStarted() const { return instFlags[TranslationStarted]; }
     void translationStarted(bool f) { instFlags[TranslationStarted] = f; }
@@ -1070,6 +1072,20 @@ BaseDynInst<Impl>::finishTranslation(WholeTranslationState *state)
     delete state;
 
     translationCompleted(true);
+}
+
+template<class Impl>
+inline void
+BaseDynInst<Impl>::triggerPTWdtb(WholeTranslationState *state,uint8_t keep,Addr paddr)
+{
+  std::cout<<"in Bade_dyn_inst.hh it don't implement."<<std::cout;
+}
+
+template<class Impl>
+inline void
+BaseDynInst<Impl>::triggerPTW(uint8_t keep,Addr paddr)
+{
+  std::cout<<"in Bade_dyn_inst.hh it don't implement."<<std::cout;
 }
 
 #endif // __CPU_BASE_DYN_INST_HH__

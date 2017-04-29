@@ -59,6 +59,8 @@ namespace X86ISA
     Addr
     vtophys(ThreadContext *tc, Addr vaddr)
     {
+        std::cout<<"enter vtophys********************@hxm"<<std::endl;
+        DPRINTF(VtoPhys, "enter ********************vtophys(%#x)\n",vaddr);
         Walker *walker = tc->getDTBPtr()->getWalker();
         unsigned logBytes;
         Addr addr = vaddr;
@@ -69,6 +71,8 @@ namespace X86ISA
         Addr masked_addr = vaddr & mask(logBytes);
         Addr paddr = addr | masked_addr;
         DPRINTF(VtoPhys, "vtophys(%#x) -> %#x\n", vaddr, paddr);
+        DPRINTF(VtoPhys, "leave ********************vtophys");
+        std::cout<<"leave vtophys********************@hxm"<<std::endl;
         return paddr;
     }
 }

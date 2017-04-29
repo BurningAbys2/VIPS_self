@@ -72,6 +72,7 @@ Sequencer::Sequencer(const Params *p)
     m_max_outstanding_requests = p->max_outstanding_requests;
     m_deadlock_threshold = p->deadlock_threshold;
 	triggerflush = false;
+    pwtnum = 0;
 
     assert(m_max_outstanding_requests > 0);
     assert(m_deadlock_threshold > 0);
@@ -142,7 +143,7 @@ Sequencer::delaywritethrough()
 	//issue write through
   if(!m_delaywritethrough.empty())
   {
-  	if((m_delaywritethrough.begin()->first+1000) <= (uint64_t)curCycle())
+  	if((m_delaywritethrough.begin()->first+2500) <= (uint64_t)curCycle())
   	 {
 		 uint64_t delayaddress = m_delaywritethrough.begin()->second; 
 		 std::shared_ptr<RubyRequest> msg = std::make_shared<RubyRequest>(clockEdge(), delayaddress, nullptr, 0, 0, RubyRequestType_ST_Unblock,RubyAccessMode_Supervisor, nullptr);   
@@ -154,7 +155,7 @@ Sequencer::delaywritethrough()
 	 }
 	 if(!m_delaywritethrough.empty()){
 	 	uint64_t delaycycle = m_delaywritethrough.begin()->first;
-	 	schedule(delaywritethrougEvent,clockEdge(Cycles(delaycycle+1000)-curCycle()));
+	 	schedule(delaywritethrougEvent,clockEdge(Cycles(delaycycle+2500)-curCycle()));
 	}
  }
 }
@@ -165,7 +166,7 @@ Sequencer::startdelaywritethrough(const Address& address){
 	uint64_t delayaddress = address.getAddress();
 	if(m_delaywritethrough.find((uint64_t)curCycle()) != m_delaywritethrough.end()) assert(false);
     m_delaywritethrough.insert(map<uint64_t,uint64_t>::value_type((uint64_t)curCycle(),delayaddress));
-	if(!delaywritethrougEvent.scheduled()) schedule(delaywritethrougEvent,clockEdge(Cycles(1000)));
+	if(!delaywritethrougEvent.scheduled()) schedule(delaywritethrougEvent,clockEdge(Cycles(2500)));
 }
 
 void
@@ -190,8 +191,6 @@ Sequencer::checkDMAAddress(const Address& address){
    else DPRINTF(RubyEvent, "in sequence.cc checkDMA share address:%#016x.\n", address.getAddress()); 
    return flags;
 }
-
-
 //@hxm***********************************************************************************************************
 
 void Sequencer::resetStats()
@@ -587,8 +586,10 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
              llscSuccess ? "Done" : "SC_Failed", "", "",
              request_address, total_latency);
 
+    DPRINTFR(ProtocolTrace, "pkt->data:%#x\n",*(pkt->getConstPtr<uint64_t>()));
     // update the data unless it is a non-data-carrying flush
     if (RubySystem::getWarmupEnabled()) {
+        DPRINTFR(ProtocolTrace, "enter getwarmupEnable***************************\n");
         data.setData(pkt->getConstPtr<uint8_t>(),
                      request_address.getOffset(), pkt->getSize());
     } else if (!pkt->isFlush()) {
@@ -599,13 +600,15 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
             (type == RubyRequestType_RMW_Read) ||
             (type == RubyRequestType_Locked_RMW_Read) ||
             (type == RubyRequestType_Load_Linked)) {
+            DPRINTFR(ProtocolTrace, "enter read***************************\n");
             memcpy(pkt->getPtr<uint8_t>(),
                    data.getData(request_address.getOffset(), pkt->getSize()),
                    pkt->getSize());
         } else {
+            DPRINTFR(ProtocolTrace, "enter write***************************\n");
             data.setData(pkt->getConstPtr<uint8_t>(),
                          request_address.getOffset(), pkt->getSize());
-			data.setflag(pkt->getConstPtr<uint8_t>(),
+	    data.setflag(pkt->getConstPtr<uint8_t>(),
                          request_address.getOffset(), pkt->getSize());
         }
     }
@@ -666,22 +669,22 @@ Sequencer::makeRequest(PacketPtr pkt)
     //if 2M page then look page table for private or share 
     if(pkt->req->getpte()){//pagetalbe access should be token care of 
 		if(pkt->isWrite()){
-		    primary_type = RubyRequestType_Locked_RMW_Write;
+			primary_type = RubyRequestType_Locked_RMW_Write;
 			secondary_type = RubyRequestType_ST_PTE;
 			m_PrivateAddress.erase(pkt->getAddr());
 			m_ShareAddress.erase(pkt->getAddr());
 			m_PTEAddress.erase(pkt->getAddr());
 			//the last one
-			if(pkt->req->getpte()==4 && m_PTEAddress.size()>0){
+			/*if(pkt->req->getpte()==4 && m_PTEAddress.size()>0){
 			//if(m_PTEAddress.size()>0){
-				do{
+				 do{
 					uint64_t PTEAddr = getPTEAddress();
 					m_ShareAddress.erase(PTEAddr);
 					m_PrivateAddress.erase(PTEAddr);
 					std::shared_ptr<RubyRequest> msg = std::make_shared<RubyRequest>(clockEdge(), PTEAddr,
 				                  nullptr, 0, 0, RubyRequestType_ST_Unblock,
 				                  RubyAccessMode_Supervisor, nullptr);	
-					DPRINTFR(ProtocolTrace, "%15s %3s %10s%20s %6s>%-6s %s %s\n",
+					DPRINTF(ProtocolTrace, "%15s %3s %10s%20s %6s>%-6s %s %s\n",
 				    		  curTick(), m_version, "Seq", "Begin", "", "",
 				    		  msg->getPhysicalAddress(),RubyRequestType_to_string(RubyRequestType_ST_Unblock));
 					Cycles latency(0);  // initialzed to an null value
@@ -694,13 +697,18 @@ Sequencer::makeRequest(PacketPtr pkt)
 			  m_third_type= secondary_type;
 			  assert(m_lockWrite_ptr!= NULL);
 			  return RequestStatus_Issued;
-			}
+			}*/
 		}else{
+			if(m_pagetablebuffer->checkPageRequstAddress(pkt,m_version))
+				if(pkt->trigger){ 
+					DPRINTF(RubyEvent,"ptw should trigger number:%#x\n",++pwtnum);
+					return RequestStatus_BufferFull; 
+				}
 			primary_type =  RubyRequestType_Locked_RMW_Read;
 			int ptestate = pkt->req->getpte();	
 			if(ptestate == 2) 
 		    	secondary_type = RubyRequestType_LD_PDP;//long PDP when is the last pkt to read the page enty,we should treat differently
-		    else if(ptestate == 3)
+			else if(ptestate == 3)
 				secondary_type = RubyRequestType_LD_PTE;//longPTE
 			else secondary_type = RubyRequestType_LD_PD;//longPML4 or longPD
 			m_PTEAddress.insert(pkt->getAddr());
@@ -722,8 +730,8 @@ Sequencer::makeRequest(PacketPtr pkt)
             assert(pkt->isRead());
             primary_type = RubyRequestType_Load_Linked;
         }
-		 secondary_type = RubyRequestType_ATOMIC;
-	     DPRINTF(RubySequencer,"in sequencer isLLSC pkt->req->getpageprivate()=%d\n",pkt->req->getpageprivate());
+	secondary_type = RubyRequestType_ATOMIC;
+	DPRINTF(RubySequencer,"in sequencer isLLSC pkt->req->getpageprivate()=%d\n",pkt->req->getpageprivate());
     } else if (pkt->req->isLockedRMW()) {
         //
         // x86 locked instructions are translated to store cache coherence
@@ -792,6 +800,7 @@ Sequencer::makeRequest(PacketPtr pkt)
             }
         } else if (pkt->isWrite()) {
 		//
+		 DPRINTF(RubySequencer, "data :#%#x\n",*(pkt->getConstPtr<uint64_t>()));
 		// Note: M5 packets do not differentiate ST from RMW_Write
 		if(pkt ->getAddr()==0x6051c0) DPRINTF(RubySequencer, "@hxm get right synchronization piont.\n");
 		if(pkt->req->getpageprivate()){
@@ -810,8 +819,8 @@ Sequencer::makeRequest(PacketPtr pkt)
 		}
 	}else if(pkt->isFlush()){
 			//transiton beteewn share and private
-			if(m_PrivateAddress.size()>0){
-			    do{
+			/*if(m_PrivateAddress.size()>0){
+		        do{
 					//std::cout<<"@hxm m_PrivateAddress_num ="<<m_PrivateAddress_num<<std::endl;
 					uint64_t privetAddr = getPrivateAddress();
 					//if(privateaddress=="0x203fc0") std::cout<<"enter isFlush\n"<<std::endl;
@@ -829,7 +838,7 @@ Sequencer::makeRequest(PacketPtr pkt)
 				  }while(m_PrivateAddress.size()>0);
 				  flushpkt = pkt;//for flush packet to callback 
 //				  std::cout<<"@hxm m_PrivateAddress_num ="<<m_PrivateAddress_num<<std::endl;
-		      }else{
+		        }else{
 					std::shared_ptr<RubyRequest> msg = std::make_shared<RubyRequest>(clockEdge(), pkt->getAddr(),
 			                  nullptr, 0, 0, RubyRequestType_FLUSH_I,
 			                  RubyAccessMode_Supervisor, nullptr);  
@@ -838,8 +847,44 @@ Sequencer::makeRequest(PacketPtr pkt)
 					m_mandatory_q_ptr->enqueue(msg, latency);
 					flushpkt = pkt;//for flush packet to callback 
 					//std::cout<<"issue flush but don't flush anything."<<std::endl;
-		      }
-		      return RequestStatus_Issued;		
+		       }
+		      return RequestStatus_Issued;*/
+		    std::set<uint64_t>::iterator flushadd;		
+			std::set<uint64_t> flushtemp;		
+			uint64_t privetAddr;		
+			assert(m_PrivateAddress_num==0);		      
+			for(flushadd = m_PrivateAddress.begin(); flushadd !=m_PrivateAddress.end(); ++flushadd){				    	                
+				if(((*flushadd)& (mask(40) << 12)) == pkt->getAddr()){						
+					privetAddr = *flushadd;											
+					flushtemp.insert(privetAddr);						
+					std::shared_ptr<RubyRequest> msg = std::make_shared<RubyRequest>(clockEdge(), privetAddr,				                  
+						nullptr, 0, 0, RubyRequestType_FLUSH_Transition,				                  
+						RubyAccessMode_Supervisor, nullptr);							 
+					DPRINTFR(ProtocolTrace, "%15s %3s %10s%20s %6s>%-6s %s %s\n",				    				  
+						curTick(), m_version, "Seq", "Begin", "", "",				    				  
+						msg->getPhysicalAddress(),RubyRequestType_to_string(RubyRequestType_FLUSH_Transition));						
+					Cycles latency(0);  // initialzed to an null value						
+					latency = m_dataCache_ptr->getLatency();						
+					std::cout<<"Before enqueue."<<std::endl;						
+					m_mandatory_q_ptr->enqueue(msg, latency);						
+					m_PrivateAddress_num ++; 						
+					std::cout<<"enter flush m_PrivateAddress_num = "<<m_PrivateAddress_num<<std::endl;					
+					}			
+				}		    
+			for(flushadd = flushtemp.begin(); flushadd !=flushtemp.end(); ++flushadd)				
+				m_PrivateAddress.erase(*flushadd);			
+			flushtemp.clear();			
+			flushpkt = pkt;//for flush packet to callback 			
+			if(m_PrivateAddress_num == 0){				
+				std::shared_ptr<RubyRequest> msg = std::make_shared<RubyRequest>(clockEdge(), pkt->getAddr(),						  
+					nullptr, 0, 0, RubyRequestType_FLUSH_I,						  
+					RubyAccessMode_Supervisor, nullptr);					
+				Cycles latency(0);	// initialzed to an null value				
+				latency = m_dataCache_ptr->getLatency();				
+				m_mandatory_q_ptr->enqueue(msg, latency);				
+				flushpkt = pkt;//for flush packet to callback 						
+				}			
+			return RequestStatus_Issued;
 	}else {
 		panic("Unsupported ruby packet type\n");
 	}

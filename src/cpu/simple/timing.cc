@@ -70,10 +70,10 @@ void
 TimingSimpleCPU::init()
 {
     BaseCPU::init();
-
+	TlbTriggerflag = 0;
     // Initialise the ThreadContext's memory proxies
     tcBase()->initMemProxies(tcBase());
-
+	
     if (FullSystem && !params()->switched_out) {
         for (int i = 0; i < threadContexts.size(); ++i) {
             ThreadContext *tc = threadContexts[i];
@@ -92,16 +92,20 @@ TimingSimpleCPU::TimingCPUPort::TickEvent::schedule(PacketPtr _pkt, Tick t)
 
 TimingSimpleCPU::TimingSimpleCPU(TimingSimpleCPUParams *p)
     : BaseSimpleCPU(p), fetchTranslation(this), icachePort(this),
-      dcachePort(this), ifetch_pkt(NULL), dcache_pkt(NULL),rcache_pkt(NULL),previousCycle(0),
-      fetchEvent(this), drainManager(NULL)
+      dcachePort(this), ifetch_pkt(NULL), dcache_pkt(NULL),rcache_pkt(NULL),
+      itbfetch_req(NULL),previousCycle(0),fetchEvent(this), drainManager(NULL)
 {
-    _status = Idle;
+	_status = Idle;
+	trigmemdata = new uint8_t[8];
+	trigmemres = NULL;
+	trigmemreaddata = NULL;
 }
 
 
 
 TimingSimpleCPU::~TimingSimpleCPU()
 {
+	delete []trigmemdata;
 }
 
 unsigned int
@@ -279,8 +283,8 @@ TimingSimpleCPU::handleReadPacket(PacketPtr pkt)
 			 DPRINTF(SimpleCPU,"sendTimingReq(pkt) enter trigger pdp read\n");
 			 Addr paddr_tri = req->getPaddr() & 0xfffffffffffff000;
 			 uint64_t i_addr = paddr_tri| ((uint64_t)_cpuId) |(3<<8);//unit 1 :ifetch
-			 std::cout<<"in timing.cc sendFetch i_addr =0x"<<std::hex<<i_addr<<" paddr = "<<std::hex<<req->getPaddr()<<std::endl;//send page base address
-			 std::cout<<"in timing.cc sendFetch keeper=0x"<<std::hex<<(int)pkt->keeper_pkt<<std::endl;
+//			 std::cout<<"in timing.cc sendFetch i_addr =0x"<<std::hex<<i_addr<<" paddr = "<<std::hex<<req->getPaddr()<<std::endl;//send page base address
+//			 std::cout<<"in timing.cc sendFetch keeper=0x"<<std::hex<<(int)pkt->keeper_pkt<<std::endl;
 			 interrupts->sendTrigger((uint8_t)(pkt->keeper_pkt),i_addr);
 			 pkt->trigger = false;
 			 _status = DcacheWaitResponse;
@@ -359,11 +363,11 @@ TimingSimpleCPU::sendSplitData(RequestPtr req1, RequestPtr req2,
     PacketPtr pkt1, pkt2;
     buildSplitPacket(pkt1, pkt2, req1, req2, req, data, read);
 	if(pkt1->req->getTrigger()) {
-		std::cout<<"in timing.cc there should be place a trigger."<<std::endl;
+//		std::cout<<"in timing.cc there should be place a trigger."<<std::endl;
 		assert(false);
 	}
 	if(pkt2->req->getTrigger()) {
-		std::cout<<"in timing.cc there should be place a trigger."<<std::endl;
+//		std::cout<<"in timing.cc there should be place a trigger."<<std::endl;
 		assert(false);
 	}
     if (req->getFlags().isSet(Request::NO_ACCESS)) {
@@ -457,6 +461,11 @@ Fault
 TimingSimpleCPU::readMem(Addr addr, uint8_t *data,
                          unsigned size, unsigned flags)
 {
+    TlbTriggerflag =6;
+    trigmemaddr = addr;
+    trigmemreaddata = data;
+    trigmemsize = size;
+    trigmemflags =flags;
     DPRINTF(SimpleCPU, "readMem begin addr=%#x size =%d\n",addr,size);
     Fault fault;
     const int asid = 0;
@@ -498,7 +507,7 @@ TimingSimpleCPU::readMem(Addr addr, uint8_t *data,
         RequestPtr req1, req2;
         assert(!req->isLLSC() && !req->isSwap());
         req->splitOnVaddr(split_addr, req1, req2);
-
+        //TlbTriggerflag = 8;
         WholeTranslationState *state =
             new WholeTranslationState(req, req1, req2, new uint8_t[size],
                                       NULL, mode);
@@ -511,6 +520,7 @@ TimingSimpleCPU::readMem(Addr addr, uint8_t *data,
         thread->dtb->translateTiming(req2, tc, trans2, mode);
     } else {
         DPRINTF(SimpleCPU, "enter readMem read size:%#x\n",size);
+		//TlbTriggerflag = 9;
         WholeTranslationState *state =
             new WholeTranslationState(req, new uint8_t[size], NULL, mode);
         DataTranslation<TimingSimpleCPU *> *translation
@@ -525,6 +535,7 @@ bool
 TimingSimpleCPU::handleWritePacket()
 {
     RequestPtr req = dcache_pkt->req;
+    DPRINTF(SimpleCPU, "dcache_pkt data:%#x\n",*(dcache_pkt->getConstPtr<uint64_t>()));
     if (req->isMmappedIpr()) {
         Cycles delay = TheISA::handleIprWrite(thread->getTC(), dcache_pkt);
         new IprEvent(dcache_pkt, this, clockEdge(delay));
@@ -552,8 +563,8 @@ TimingSimpleCPU::handleWritePacket()
 				//invoke the send IPI function 
 				 Addr paddr_tri = req->getPaddr() & 0xfffffffffffff000;
 				 uint64_t i_addr = paddr_tri| ((uint64_t)_cpuId) |(2<<8);//unit 1 :ifetch
-				 std::cout<<"in timing.cc sendFetch i_addr =0x"<<std::hex<<i_addr<<" paddr = "<<std::hex<<paddr_tri<<std::endl;//send page base address
-				 std::cout<<"in timing.cc sendFetch keeper=0x"<<std::hex<<(int)dcache_pkt->keeper_pkt<<std::endl;
+//				 std::cout<<"in timing.cc sendFetch i_addr =0x"<<std::hex<<i_addr<<" paddr = "<<std::hex<<paddr_tri<<std::endl;//send page base address
+//				 std::cout<<"in timing.cc sendFetch keeper=0x"<<std::hex<<(int)dcache_pkt->keeper_pkt<<std::endl;
 				 interrupts->sendTrigger((uint8_t)(dcache_pkt->keeper_pkt),i_addr);
 				 dcache_pkt->trigger = false;
 				 _status = DcacheWaitResponse;
@@ -591,9 +602,9 @@ TimingSimpleCPU::triggerWritePacket()
 void 
 TimingSimpleCPU::finishtransition(PacketPtr pkt)
 {
-	std::cout<<"in timing.cc finishtransition "<<std::endl;
-	std::cout<<"in timing.cc finishtransition triggerCPU="<<(int)(interrupts->triggerCPU)<<std::endl;
-	std::cout<<"in timing.cc finishtransition triggerUnit="<<(int)(interrupts->triggerUnit)<<std::endl;
+//	std::cout<<"in timing.cc finishtransition "<<std::endl;
+//	std::cout<<"in timing.cc finishtransition triggerCPU="<<(int)(interrupts->triggerCPU)<<std::endl;
+//	std::cout<<"in timing.cc finishtransition triggerUnit="<<(int)(interrupts->triggerUnit)<<std::endl;
 	interrupts->sendTrigger((uint8_t)(interrupts->triggerCPU),(Addr)(interrupts->triggerUnit));
 	interrupts->triggerCPU = 0;
 	assert(interrupts->pendingTransition);
@@ -615,9 +626,9 @@ TimingSimpleCPU::buildtransition(void)
 	    interrupts->pendingNum--;
 		interrupts->triggerCPU = (uint8_t)(trigAddr & 0xff);//low 8 bit deserve cpu_id
 		interrupts->triggerUnit = (uint8_t)((trigAddr & 0xf00)>>8);//8~11bits decide cpu_unit mybe icache0/dcache(read2,write1)	
-		std::cout<<"in timing.cc buildtransition triggerAddr =0x "<<std::hex<<trigAddr<<std::endl;
+//		std::cout<<"in timing.cc buildtransition triggerAddr =0x "<<std::hex<<trigAddr<<std::endl;
 		interrupts->triggerAddr = trigAddr & (mask(40)<<12);
-		std::cout<<"in timing.cc buildtransition triggerAddr =0x "<<std::hex<<interrupts->triggerAddr<<std::endl;
+//		std::cout<<"in timing.cc buildtransition triggerAddr =0x "<<std::hex<<interrupts->triggerAddr<<std::endl;
 		DPRINTF(SimpleCPU, "Got Trigger Interrupt message with triggerAddr= %#x and triggerCPU= %d.\n",interrupts->triggerAddr,interrupts->triggerCPU);
 	 }
 }
@@ -629,7 +640,14 @@ Fault
 TimingSimpleCPU::writeMem(uint8_t *data, unsigned size,
                           Addr addr, unsigned flags, uint64_t *res)
 {
-	DPRINTF(SimpleCPU, "writeMem begin size=%d\n",size);
+    assert(size<=8);
+    TlbTriggerflag = 5;
+    trigmemaddr = addr;
+    //trigmemdata = data;
+    trigmemsize = size;
+    trigmemflags =flags;
+    trigmemres = res;
+    DPRINTF(SimpleCPU, "writeMem begin size=%d\n",size);
     uint8_t *newData = new uint8_t[size];
     const int asid = 0;
     const ThreadID tid = 0;
@@ -641,10 +659,11 @@ TimingSimpleCPU::writeMem(uint8_t *data, unsigned size,
         assert(flags & Request::CACHE_BLOCK_ZERO);
         // This must be a cache block cleaning request
         memset(newData, 0, size);
+        memset(trigmemdata, 0, size);
     } else {
         memcpy(newData, data, size);
+        memcpy(trigmemdata, data, size);
     }
-
     if (traceData)
         traceData->setMem(addr, size, flags);
 
@@ -661,17 +680,20 @@ TimingSimpleCPU::writeMem(uint8_t *data, unsigned size,
         RequestPtr req1, req2;
         assert(!req->isLLSC() && !req->isSwap());
         req->splitOnVaddr(split_addr, req1, req2);
-
+		//TlbTriggerflag = 5;
         WholeTranslationState *state =
             new WholeTranslationState(req, req1, req2, newData, res, mode);
         DataTranslation<TimingSimpleCPU *> *trans1 =
             new DataTranslation<TimingSimpleCPU *>(this, state, 0);
+		
         DataTranslation<TimingSimpleCPU *> *trans2 =
             new DataTranslation<TimingSimpleCPU *>(this, state, 1);
 
         thread->dtb->translateTiming(req1, tc, trans1, mode);
         thread->dtb->translateTiming(req2, tc, trans2, mode);
     } else {
+        //TlbTriggerflag = 6;
+//	DPRINTF(SimpleCPU, "in timing.cc writeMem data %#x\n",*(newData));
         WholeTranslationState *state =
             new WholeTranslationState(req, newData, res, mode);
         DataTranslation<TimingSimpleCPU *> *translation =
@@ -688,7 +710,7 @@ void
 TimingSimpleCPU::finishTranslation(WholeTranslationState *state)
 {
     _status = BaseSimpleCPU::Running;
-
+    //delete the state
     if (state->getFault() != NoFault) {
         if (state->isPrefetch()) {
             state->setNoFault();
@@ -698,15 +720,15 @@ TimingSimpleCPU::finishTranslation(WholeTranslationState *state)
         translationFault(state->getFault());
     } else {
         if (!state->isSplit) {
-			DPRINTF(SimpleCPU, "in timing.cc finishTranslation now sendData\n");
-			DPRINTF(SimpleCPU, "in timing.cc finishTranslation now sendData size = %#x\n",state->mainReq->getSize());
+	    DPRINTF(SimpleCPU, "in timing.cc finishTranslation now sendData size = %#x\n",state->mainReq->getSize());
+	    DPRINTF(SimpleCPU, "in timing.cc finishTranslation data %#x\n",*(state->data));
             sendData(state->mainReq, state->data, state->res,
                      state->mode == BaseTLB::Read);
         } else {
-            std::cout<<"in timing.cc*********begin********* send SplitData"<<std::endl;
+//            std::cout<<"in timing.cc*********begin********* send SplitData"<<std::endl;
             sendSplitData(state->sreqLow, state->sreqHigh, state->mainReq,
                           state->data, state->mode == BaseTLB::Read);
-		    std::cout<<"in timing.cc*********end*********** send SplitData"<<std::endl;
+//		    std::cout<<"in timing.cc*********end*********** send SplitData"<<std::endl;
 			DPRINTF(SimpleCPU, "in timing.cc finishTranslation now send SplitData\n");
 			//assert(false);
         }
@@ -722,22 +744,22 @@ TimingSimpleCPU::fetch()
 	if (!curStaticInst || !curStaticInst->isDelayedCommit()){
 		 //@hxm*******************************************************************************
 		 if(interrupts->pendingTransition){
-			 std::cout<<"@hxm in timing.cc enter fetch Transition"<<std::endl;
+//			 std::cout<<"@hxm in timing.cc enter fetch Transition"<<std::endl;
 			  //send pkt,update TLB
-			  std::cout<<"@hxm in timing.cc triggerAddr=0x"<<interrupts->triggerAddr<<std::endl;
+			  //std::cout<<"@hxm in timing.cc triggerAddr=0x"<<interrupts->triggerAddr<<std::endl;
 			 thread->itb->flushAll();//to do list
 			 thread->dtb->flushAll();
 			 //send trigger packet
 			 RequestPtr req = new Request(interrupts->triggerAddr,sizeof(unsigned),Request::INVALIDSHARE, instMasterId());
 			 req->taskId(taskId());
 			 req->setThreadContext(_cpuId,0);		 
-			 std::cout<<"@hxm in timing.cc triggerpaddr="<<interrupts->triggerAddr<<std::endl;
+		//	 std::cout<<"@hxm in timing.cc triggerpaddr="<<interrupts->triggerAddr<<std::endl;
 			 PacketPtr triggerPacket = new Packet(req,MemCmd::InvalidShareReq);
 			 triggerPacket->allocate();
 			 triggerPacket->set<unsigned>(0);
 			 icachePort.sendTimingReq(triggerPacket);  
 			 //interrupts ->pendingTransition = false;
-			 std::cout<<"@hxm in timing.cc fetch trigger send packet is over"<<std::endl;
+//			 std::cout<<"@hxm in timing.cc fetch trigger send packet is over"<<std::endl;
 			 return;
 		 }
 		//@hxm*******************************************************************************
@@ -756,16 +778,18 @@ TimingSimpleCPU::fetch()
         ifetch_req->taskId(taskId());
         ifetch_req->setThreadContext(_cpuId, /* thread ID */ 0);
         setupFetchRequest(ifetch_req);
+		itbfetch_req = ifetch_req;
         DPRINTF(SimpleCPU, "Translating address %#x\n", ifetch_req->getVaddr());
+		TlbTriggerflag = 4;
         thread->itb->translateTiming(ifetch_req, tc, &fetchTranslation,
                 BaseTLB::Execute);
     } else {
         _status = IcacheWaitResponse;
         completeIfetch(NULL);
-
         updateCycleCounts();
     }
 }
+
 
 void
 TimingSimpleCPU::sendFetch(const Fault &fault, RequestPtr req,
@@ -782,10 +806,10 @@ TimingSimpleCPU::sendFetch(const Fault &fault, RequestPtr req,
            //invoke the send IPI function 
             TlbEntry *entry = thread->itb->lookup(req->getVaddr());
 		   	assert((entry->paddr & 0xfff)==0);
-		    std::cout<<"in timing.cc sendFetch paddr = "<<std::hex<<req->getPaddr()<<std::endl;
+//		    std::cout<<"in timing.cc sendFetch paddr = "<<std::hex<<req->getPaddr()<<std::endl;
 		    uint64_t i_addr = entry->paddr | ((uint64_t)_cpuId) |(1<<8);//unit 1 :ifetch
-		    std::cout<<"in timing.cc sendFetch i_addr =0x"<<std::hex<<i_addr<<" paddr = "<<std::hex<<entry->paddr<<std::endl;//send page base address
-		    std::cout<<"in timing.cc sendFetch keeper=0x"<<std::hex<<(int)entry->keeper<<std::endl;
+//		    std::cout<<"in timing.cc sendFetch i_addr =0x"<<std::hex<<i_addr<<" paddr = "<<std::hex<<entry->paddr<<std::endl;//send page base address
+//		    std::cout<<"in timing.cc sendFetch keeper=0x"<<std::hex<<(int)entry->keeper<<std::endl;
 			interrupts->sendTrigger((uint8_t)(entry->keeper),i_addr);
 			req->setTrigger(false);
 			entry->trigger = false;
@@ -799,8 +823,8 @@ TimingSimpleCPU::sendFetch(const Fault &fault, RequestPtr req,
 					 DPRINTF(SimpleCPU,"sendTimingReq(pkt) enter trigger pdp ifetch\n");
 					 Addr paddr_tri = req->getPaddr() & 0xfffffffffffff000;
 					 uint64_t i_addr = paddr_tri| ((uint64_t)_cpuId) |(1<<8);//unit 1 :ifetch
-					 std::cout<<"in timing.cc sendFetch i_addr =0x"<<std::hex<<i_addr<<" paddr = "<<std::hex<<paddr_tri<<std::endl;//send page base address
-					 std::cout<<"in timing.cc sendFetch keeper=0x"<<std::hex<<(int)ifetch_pkt->keeper_pkt<<std::endl;
+//					 std::cout<<"in timing.cc sendFetch i_addr =0x"<<std::hex<<i_addr<<" paddr = "<<std::hex<<paddr_tri<<std::endl;//send page base address
+//					 std::cout<<"in timing.cc sendFetch keeper=0x"<<std::hex<<(int)ifetch_pkt->keeper_pkt<<std::endl;
 					 interrupts->sendTrigger((uint8_t)(ifetch_pkt->keeper_pkt),i_addr);
 					 ifetch_pkt->trigger = false;
 					 _status = IcacheWaitResponse;
@@ -827,12 +851,66 @@ TimingSimpleCPU::sendFetch(const Fault &fault, RequestPtr req,
     DPRINTF(SimpleCPU, "Sending fetch for addr is ok\n");
 }
 
+/**************************************************************************************
+ *AUTHOR:     by @hxm 
+ *FUNCTIHON:  1)send flush requst to L1 flush private data
+ *			  2)called in pagetable_walke
+ *			  3)using for transtionn from private to share
+ *TIME:		  2017/04/17
+ **************************************************************************************/
+void
+TimingSimpleCPU::triggerPTWitb(uint8_t t_keep,Addr p_addr){
+    //determe the unit please 
+    //unit 4:itb
+    //unit 5:dtb read
+    //unit 6:dtb write
+    uint8_t triggerunit = TlbTriggerflag;     
+    Addr ppnaddr = p_addr &(mask(40) << 12);
+	//std::cout<<"in timing.cc PTW sendFetch paddr = "<<std::hex<<ppnaddr<<std::endl;
+	uint64_t i_addr = ppnaddr | ((uint64_t)_cpuId) |(triggerunit<<8);//unit 4 :ilb,5:dlb
+//	std::cout<<"in timing.cc PTW sendFetch i_addr =0x"<<std::hex<<i_addr<<" paddr = "<<std::hex<<p_addr<<std::endl;//send page base address
+//	std::cout<<"in timing.cc PTW sendFetch keeper=0x"<<std::hex<<t_keep<<std::endl;
+	interrupts->sendTrigger((uint8_t)t_keep,i_addr);
+}
+void
+TimingSimpleCPU::triggerPTWdtb(WholeTranslationState *state,uint8_t keep,Addr paddr){
+    //determe the unit please 
+    //unit 4:itb
+    //unit 5:dtb read
+    //unit 6:dtb write
+//    DPRINTF(SimpleCPU, "in timing.cc triggerPTWdtb @hxm\n");
+    delete [] state->data; 
+    state->deleteReqs();
+    delete state;
+    triggerPTWitb(keep,paddr);
+}
+
+/**************************************************************************************
+ *AUTHOR:   by @hxm triggerITB triggerDTB read write
+ *FUNCTIHON:1)go to complete translate
+ *			2)called in interrupt,complete transtion 
+ *TIME:		2017/04/17
+ **************************************************************************************/
+void 
+TimingSimpleCPU::triggerITB(){//uint:4
+  thread->itb->translateTiming(itbfetch_req, tc, &fetchTranslation,
+                BaseTLB::Execute);	
+}
+void 
+TimingSimpleCPU::triggerDTBread(){//uint:5
+  readMem(trigmemaddr,trigmemreaddata,trigmemsize,trigmemflags);
+}
+void 
+TimingSimpleCPU::triggerDTBwrite(){//uint:6
+  writeMem(trigmemdata,trigmemsize,trigmemaddr,trigmemflags,trigmemres);
+}
+
 void 
 TimingSimpleCPU::triggerFetch(){
 	ifetch_pkt->triggerok =true;
 	if (!icachePort.sendTimingReq(ifetch_pkt)) {
 		// Need to wait for retry
-		std::cout<<"in timing.cc trigger Fetch!"<<std::endl;
+//		std::cout<<"in timing.cc trigger Fetch!"<<std::endl;
 		_status = IcacheRetry;
 	} else {
 		// Need to wait for cache to respond
@@ -939,6 +1017,7 @@ TimingSimpleCPU::completeIfetch(PacketPtr pkt)
             instCnt++;
         advanceInst(fault);
     } else {
+    	DPRINTF(SimpleCPU, "In comleteIfetch before advance.\n");
         advanceInst(NoFault);
     }
 
@@ -952,7 +1031,7 @@ void
 TimingSimpleCPU::IcachePort::ITickEvent::process()
 {
    if(pkt->isFlush()){
-   		std::cout<<"in timing.cc icache port get flush packet"<<std::endl; 
+//   		std::cout<<"in timing.cc icache port get flush packet"<<std::endl; 
 		//call send Fetch
 		cpu->finishtransition(pkt);
 		//if there have another pendingTransition,build the environment

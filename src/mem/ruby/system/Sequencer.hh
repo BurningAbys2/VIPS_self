@@ -230,6 +230,7 @@ class Sequencer : public RubyPort
 	//std::queue<uint64_t> m_delaycycle;
 	std::map<uint64_t,uint64_t> m_delaywritethrough;
 	bool triggerflush;
+        uint8_t pwtnum;
 	//@hxm******************************************************
     typedef m5::hash_map<Address, SequencerRequest*> RequestTable;
     RequestTable m_writeRequestTable;

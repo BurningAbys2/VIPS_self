@@ -78,12 +78,13 @@ Walker::start(ThreadContext * _tc, BaseTLB::Translation *_translation,
     if (currStates.size()) {
         assert(newState->isTiming());
         DPRINTF(PageTableWalker, "Walks in progress: %d\n", currStates.size());
+		//assert(false);
         currStates.push_back(newState);
         return NoFault;
     } else {
         currStates.push_back(newState);
         Fault fault = newState->startWalk();
-        if (!newState->isTiming()) {
+        if (!newState->isTiming() || newState->walkerstatetrigger) {
             currStates.pop_front();
             delete newState;
         }
@@ -229,7 +230,7 @@ Walker::WalkerState::startWalk()
         nextState = state;
         state = Waiting;
         timingFault = NoFault;
-        sendPackets();
+        sendPackets();	
     } else {
         do {
             walker->port.sendAtomic(read);
@@ -250,11 +251,11 @@ Walker::WalkerState::startWalk()
 Fault
 Walker::WalkerState::startFunctional(Addr &addr, unsigned &logBytes)
 {
+    std::cout<<"in Pagetable_walker.cc enter startFunction."<<std::endl;
     Fault fault = NoFault;
     assert(!started);
     started = true;
     setupWalk(addr);
-
     do {
         walker->port.sendFunctional(read);
         // On a functional access (page table lookup), writes should
@@ -267,7 +268,7 @@ Walker::WalkerState::startFunctional(Addr &addr, unsigned &logBytes)
     } while(read);
     logBytes = entry.logBytes;
     addr = entry.paddr;
-
+    std::cout<<"in Pagetable_walker.cc leave  startFunction."<<std::endl;
     return fault;
 }
 
@@ -302,8 +303,8 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
         if (badNX || !pte.p) {
             doEndWalk = true;
             fault = pageFault(pte.p);
-	    pte.a = ! doWrite;//recover pte
- //std::cout<<"in pagetable_walker.cc at LongPML4,virtualaddress="<<std::hex<<vaddr<<"."<<std::endl;
+	    pte.a = !doWrite;//recover pte
+        //std::cout<<"in pagetable_walker.cc at LongPML4,virtualaddress="<<std::hex<<vaddr<<"."<<std::endl;
             break;
         }
         entry.noExec = pte.nx;
@@ -320,8 +321,8 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
         if (badNX || !pte.p) {
             doEndWalk = true;
             fault = pageFault(pte.p);
-	    pte.a = ! doWrite;//recover pte
-//std::cout<<"in pagetable_walker.cc at LongPDP."<<std::endl;
+	    	pte.a = !doWrite;//recover pte
+			//std::cout<<"in pagetable_walker.cc at LongPDP."<<std::endl;
             break;
         }
         nextState = LongPD;
@@ -335,7 +336,7 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
         entry.user = entry.user && pte.u;
         if (badNX || !pte.p) {
 			DPRINTF(PageTableWalker,"Got long mode PD entry fault\n");
-//			std::cout<<"in pagetable_walker.cc at LongPD."<<std::endl;
+            //std::cout<<"in pagetable_walker.cc at LongPD."<<std::endl;
 			doEndWalk = true;
             fault = pageFault(pte.p);
 			pte.a = !doWrite;//recover pte
@@ -344,7 +345,7 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
         if (!pte.ps) {
     	    //DPRINTF(PageTableWalker,"Got long mode PD entry\n");
 		    //e.a = 1;
-            // 4 KB page
+            // 4 KB page;
             entry.logBytes = 12;
             nextRead =
                 ((uint64_t)pte & (mask(40) << 12)) + vaddr.longl1 * dataSize;
@@ -416,14 +417,14 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
 		//	std::cout<<"in pagetable_walker.cc at LongPTE."<<std::endl;
             break;
         }
-		entry.paddr = (uint64_t)pte & (mask(40) << 12);
-        entry.uncacheable = uncacheable;
-        entry.global = pte.g;
-        entry.patBit = bits(pte, 12);
+	entry.paddr = (uint64_t)pte & (mask(40) << 12);
+	entry.uncacheable = uncacheable;
+	entry.global = pte.g;
+	entry.patBit = bits(pte, 12);
         entry.vaddr = entry.vaddr & ~((4 * (1 << 10)) - 1);
-		entry.prvt = pte.prv;
-		entry.trigger = pte.trig;
-		entry.keeper=pte.interrupt10cpu;
+	entry.prvt = pte.prv;
+	entry.trigger = pte.trig;
+	entry.keeper=pte.interrupt10cpu;
 		//如果没有被访问过页面初始化为私有页面
 		//std::cout<<"@hxm:the pte.avl="<<pte.avl<<" and cpuId="<<tc->cpuId()<<std::endl;	
 		//第一次访问时
@@ -454,7 +455,7 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
 	}*/
 	//@hxm********************************************************over
 	//Bits 51:21 are from the PDE Bits 20:0 are from the original address	
-		doTLBInsert = true;
+	doTLBInsert = true;
         doEndWalk = true;
         DPRINTF(PageTableWalkerhxm,"Got long mode PTE entry insert %#016x.and LongPD %#016x.\n", (uint64_t)pte,(uint64_t)ptepd);
         break;
@@ -593,16 +594,17 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
     if (doEndWalk) {
         if (doTLBInsert)
             if (!functional){
-				walker->tlb->insert(entry.vaddr, entry);	
-			}
+		    walker->tlb->insert(entry.vaddr, entry);	
+	    }
 		//@hxm the last packet of pagetablewalker,and unlock all data of packet of this module sending
 		//so write for PTE
 		//when pagetable walker is over or abort 
+		//*********************hxm*************************************
 		write = read;
 		write->set<uint64_t>(pte);
 		write->cmd = MemCmd::WriteReq;
 		write->req->setpte(4);
-        endWalk();
+	endWalk();
     } else {
         PacketPtr oldRead = read;
         //If we didn't return, we're setting up another read.
@@ -611,12 +613,12 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
         RequestPtr request =
             new Request(nextRead, oldRead->getSize(), flags, walker->masterId);
 		//@hxm*********************************************************************
-		if(nextState == LongPD) request->setpte(2);//L2 will handle longPD, PS,P
-		else if(nextState == LongPTE) request->setpte(3);//L2 will handl LongPTE,P
-		else request->setpte(1);//L2 will handle longMPL4 or LongPDP
-		//in order to collect the physical address
-		//@hxm*********************************************************************
-		request->setpageprivate(false);//all page entry should be share
+	if(nextState == LongPD) request->setpte(2);//L2 will handle longPD, PS,P
+	else if(nextState == LongPTE) request->setpte(3);//L2 will handl LongPTE,P
+	else request->setpte(1);//L2 will handle longMPL4 or LongPDP
+	//in order to collect the physical address
+	//@hxm*********************************************************************
+	request->setpageprivate(false);//all page entry should be share
         read = new Packet(request, MemCmd::ReadReq);
         read->allocate();
         // If we need to write, adjust the read packet to write the modified
@@ -699,13 +701,13 @@ Walker::WalkerState::recvPacket(PacketPtr pkt)
     assert(pkt->isResponse());
     assert(inflight);
     assert(state == Waiting);
-//	if(pkt->getAddr()==0x203fc0) std::cout<<"in Pagetable_walker walkerstate recvPacket."<<std::endl;
+//if(pkt->getAddr()==0x203fc0) std::cout<<"in Pagetable_walker walkerstate recvPacket."<<std::endl;
     inflight--;
     if (pkt->isRead()) {
-        // should not have a pending read it we also had one outstanding
+        //should not have a pending read it we also had one outstanding
         assert(!read);
 
-        // @todo someone should pay for this
+        //@todo someone should pay for this
         pkt->headerDelay = pkt->payloadDelay = 0;
 
         state = nextState;
@@ -714,17 +716,19 @@ Walker::WalkerState::recvPacket(PacketPtr pkt)
         read = pkt;
         timingFault = stepWalk(write);
         state = Waiting;
-        assert(timingFault == NoFault || read == NULL);
+        assert(timingFault == NoFault || read == NULL);//satisify one condition
         if (write) {
             writes.push_back(write);
         }
         sendPackets();
     } else {
+        //assert(false);
         sendPackets();
     }
     if (inflight == 0 && read == NULL && writes.size() == 0) {
         state = Ready;
         nextState = Waiting;
+		if(walkerstatetrigger) return true;//then walkstate will be deleted
         if (timingFault == NoFault) {
             /*
              * Finish the translation. Now that we now the right entry is
@@ -738,7 +742,9 @@ Walker::WalkerState::recvPacket(PacketPtr pkt)
  	    DPRINTF(PageTableWalkerhxm, " in pagetable_walker.cc vaddr is %#016x.\n",(uint64_t)(req->getVaddr()));
             assert(!delayedResponse);
             // Let the CPU continue.
+            DPRINTF(PageTableWalkerhxm, "enter finish before.\n");
             translation->finish(fault, req, tc, mode);
+	    DPRINTF(PageTableWalkerhxm, "enter finish after.\n");
         } else {
             // There was a fault during the walk. Let the CPU know.
             translation->finish(timingFault, req, tc, mode);
@@ -767,11 +773,21 @@ Walker::WalkerState::sendPackets()
         PacketPtr pkt = read;
         read = NULL;
         inflight++;
-        if (!walker->sendTiming(this, pkt)) {
-            retrying = true;
-            read = pkt;
-            inflight--;
-            return;
+        if (!walker->sendTiming(this, pkt)){
+			if(pkt->trigger){
+				inflight--;
+				//using for poping and deleting walkerSate
+				walkerstatetrigger = true;
+				//let cpu know
+			    translation->triggerPTW((uint8_t)pkt->keeper_pkt,pkt->getAddr());
+				delete pkt->req;
+				delete pkt;
+			}else{
+	            retrying = true;
+	            read = pkt;
+	            inflight--;
+				return;
+			}
         }
     }
     //Send off as many of the writes as we can.

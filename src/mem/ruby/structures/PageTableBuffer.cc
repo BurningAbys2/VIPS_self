@@ -89,7 +89,7 @@ PageTableBuffer::checkAddress(PacketPtr pkt,uint32_t id)
 	 std::map<uint64_t,uint64_t>::iterator iter;
 	 uint64_t ppnfirst = address & (mask(40) << 12);//4KB
 	 iter = m_shareEntryPTEData.find(ppnfirst);
-	 if(iter !=m_shareEntryPTEData.end()) { //the 4kb page that address belongs to is accessed before
+	 if(iter !=m_shareEntryPTEData.end()) {//the 4kb page that address belongs to is accessed before
 	 //check its share or private 
 	        if(!(iter ->second & 0x100)) return false;//share
 		    else if((NodeID)(iter->second & 0xff) != id)//private,(9th bit  1:private) have different keeper,trigger
@@ -124,6 +124,46 @@ PageTableBuffer::checkAddress(PacketPtr pkt,uint32_t id)
 	    return true;
 	 }
 }
+//using for pagetable walker checking trigger
+bool
+PageTableBuffer::checkPageRequstAddress(PacketPtr pkt,uint32_t id)
+{
+	//second: |_||_||_|***|_|	|_|    |_|
+	//         63 62 61   10	 9	8
+	//		             pdp	lock  private					  
+	//uint64_t ppnsecond= 0;
+	uint64_t address = pkt->getAddr();
+	std::map<uint64_t,uint64_t>::iterator iter;
+	uint64_t ppnfirst = address & (mask(40) << 12);//4KB
+	for(iter = m_shareEntryPTEData.begin();iter != m_shareEntryPTEData.end();iter++)  //std::cout<<iter->second<<std::endl;
+	     DPRINTF(hxmRubyPrivate,"in checkPageRequstAddress,iter->second:%#x. and address:%#x.id:%#x.\n",iter->second,address,id);
+	iter = m_shareEntryPTEData.find(ppnfirst);
+	if(iter !=m_shareEntryPTEData.end()) { //the 4kb page that address belongs to is accessed before
+	//check its share or private 
+		DPRINTF(hxmRubyPrivate,"in checkRequestAddress find same address.\n");
+		   if(((NodeID)(iter->second & 0xff) != id)&&(iter ->second & 0x100))//private,(9th bit  1:private) have different keeper,trigger
+		   {
+			 // pkt->trigger = true;
+			 //  return true;
+			 //there will be some problem
+			 if(iter ->second & 0x800){
+			   assert(iter->second & 0x200);//lock state 
+			   iter->second =iter->second & 0xfffffffffffff4ff;//set unlock,share,release
+			   pkt->trigger = false;
+			   return false;//share
+			 }else{
+			   pkt->keeper_pkt = 0xff & (iter->second);//set keeper
+			   pkt->trigger = true;
+			   iter->second = (iter->second)|0xa00;//set lock(private)
+			   DPRINTF(hxmRubyPrivate, "checkAddressPTE222222222222222222222222222222222222222setshare.\n");
+			   return true;
+			 }
+		   }else return false;
+	}else {//no 4kb page ,don't care
+		return true; //ignore
+	}
+}
+
 //using for 4KB page to check in L1cache
 bool
 PageTableBuffer::checkAddress(const Address& addr)
@@ -143,7 +183,28 @@ PageTableBuffer::checkAddress(const Address& addr)
 	 assert(false);
 	 return true;
 }
+//using test pagetable walker
+//using for 4KB page to check in L1cache
+/*bool
+PageTableBuffer::checkAddress(const Address& addr)
+{
+     //second: |_||_||_|***|_|   |_|    |_|
+     //         63 62 61   10     9      8
+     //                    pdp   lock  private                     
+     uint64_t address = addr.getAddress();
+	 std::map<uint64_t,uint64_t>::iterator iter;
+	 uint64_t ppnfirst = address & (mask(40) << 12);//4KB
+	 iter = m_shareEntryPTEData.find(ppnfirst);
+	 if(iter !=m_shareEntryPTEData.end()) { //the 4kb page that address belongs to is accessed before
+	    //check its share or private 
+	    if(!(iter ->second & 0x100)) return false;//share
+	    else return true;
+	 }
+	 assert(false);
+	 return true;
+}*/
 
+//there may be some bug,will solve it later
 void
 PageTableBuffer::checkcacheAddress(const Address& address,DataBlock& dblk,const MachineID& Machinenum)
 {

@@ -73,7 +73,10 @@ class WholeTranslationState
     uint8_t *data;
     uint64_t *res;
     BaseTLB::Mode mode;
-
+	
+	bool triggerTrans[2];
+	uint8_t keeperTrans[2];
+    uint64_t paddrTrans[2]; 
     /**
      * Single translation state.  We set the number of outstanding
      * translations to one and indicate that it is not split.
@@ -84,6 +87,9 @@ class WholeTranslationState
           sreqLow(NULL), sreqHigh(NULL), data(_data), res(_res), mode(_mode)
     {
         faults[0] = faults[1] = NoFault;
+		triggerTrans[0] = triggerTrans[1] = false;
+		keeperTrans[0] = keeperTrans[1] = 0;
+		paddrTrans[0] = paddrTrans[1] = 0;
         assert(mode == BaseTLB::Read || mode == BaseTLB::Write);
     }
 
@@ -100,6 +106,9 @@ class WholeTranslationState
           mode(_mode)
     {
         faults[0] = faults[1] = NoFault;
+		triggerTrans[0] = triggerTrans[1] = false;
+		keeperTrans[0] = keeperTrans[1] = 0;
+		paddrTrans[0] = paddrTrans[1] = 0;
         assert(mode == BaseTLB::Read || mode == BaseTLB::Write);
     }
 
@@ -119,13 +128,23 @@ class WholeTranslationState
         if (isSplit && outstanding == 0) {
 
             // For ease later, we copy some state to the main request.
-            if (faults[0] == NoFault) {
+            if (faults[0] == NoFault && !triggerTrans[0]) {
                 mainReq->setPaddr(sreqLow->getPaddr());
             }
             mainReq->setFlags(sreqLow->getFlags());
             mainReq->setFlags(sreqHigh->getFlags());
         }
         return outstanding == 0;
+    }
+    bool
+    triggerPTW(uint8_t keep,Addr paddr,int index)
+    {
+    	assert(outstanding);
+		triggerTrans[index] = true;
+		keeperTrans[index] = keep;
+		paddrTrans[index] = paddr;
+		outstanding--;
+		return outstanding == 0;
     }
 
     /**
@@ -255,15 +274,35 @@ class DataTranslation : public BaseTLB::Translation
         assert(state);
         assert(mode == state->mode);
         if (state->finish(fault, index)) {
-            if (state->getFault() == NoFault) {
-                // Don't access the request if faulted (due to squash)
-                req->setTranslateLatency();
-            }
-            xc->finishTranslation(state);
+			if(state->triggerTrans[0])
+	            xc->triggerPTWdtb(state,state->keeperTrans[0],state->paddrTrans[0]);
+			else if(state->triggerTrans[1])
+				xc->triggerPTWdtb(state,state->keeperTrans[1],state->paddrTrans[1]);
+			else{	
+	            if (state->getFault() == NoFault) {
+	                // Don't access the request if faulted (due to squash)
+	                req->setTranslateLatency();
+	            }
+	            xc->finishTranslation(state);
+			}
         }
         delete this;
     }
+    void
+	triggerPTW(uint8_t keep,Addr paddr)
+	{
+        assert(state);
+        if (state->triggerPTW(keep,paddr,index)) {
+		    if(state->triggerTrans[0])
+	            xc->triggerPTWdtb(state,state->keeperTrans[0],state->paddrTrans[0]);
+			else if(state->triggerTrans[1])
+				xc->triggerPTWdtb(state,state->keeperTrans[1],state->paddrTrans[1]);
+			else assert(false);
+		}
+        delete this;
 
+	}
+	
     bool
     squashed() const
     {

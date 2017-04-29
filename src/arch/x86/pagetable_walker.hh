@@ -113,6 +113,9 @@ namespace X86ISA
             bool started;
 			//@hxm********************
 			PageTableEntry ptepd;
+			bool walkerstatetrigger;
+			//uint8_t keeperPTW;
+			//uint64_t addressPTW;
 			//@hxm********************
           public:
             WalkerState(Walker * _walker, BaseTLB::Translation *_translation,
@@ -121,7 +124,7 @@ namespace X86ISA
                         nextState(Ready), inflight(0),
                         translation(_translation),
                         functional(_isFunctional), timing(false),
-                        retrying(false), started(false),ptepd(0)
+                        retrying(false), started(false),ptepd(0),walkerstatetrigger(false)
             {
             }
             void initState(ThreadContext * _tc, BaseTLB::Mode _mode,

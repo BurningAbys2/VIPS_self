@@ -136,18 +136,18 @@ machine(L1Cache, "MESI Directory L1 Cache CMP")
 
 	
     Data_M,            desc="Data for processor store";
-	Data_R,            desc="Data for processor read";
+    Data_R,            desc="Data for processor read";
     SelfInv,           desc="Invalidate request from the home processor";
     FLUSH,	           desc="flush when transition between private and share";
   
     L2_WB_Ack,	         desc="ACk for replacement";
     L2_WT_Ack,			desc="ACK for writethrough";
-	L2_WT_Ack_last,		desc="flush synchrozition the last one";
+    L2_WT_Ack_last,		desc="flush synchrozition the last one";
 	
     PF_Load,         desc="load request from prefetcher";
     PF_Ifetch,       desc="instruction fetch request from prefetcher";
     PF_Store,        desc="exclusive load request from prefetcher";
-	Inv,desc="for DMA or L2replacement to invalidate L1 private data";
+    Inv,desc="for DMA or L2replacement to invalidate L1 private data";
   }
 
   // TYPES
@@ -311,6 +311,8 @@ machine(L1Cache, "MESI Directory L1 Cache CMP")
       return Event:Store_T;
     }else if (type == RubyRequestType:FLUSH) {
       return Event:L1_FLUSH;
+    }else if (type == RubyRequestType:UPDATE) {
+      return Event:L1_UPDATE;  
     }else {
       error("Invalid RubyRequestType");
     }
@@ -530,7 +532,39 @@ machine(L1Cache, "MESI Directory L1 Cache CMP")
 				}
 			 }
 	    //@hxm*************************************************************************
-		} else  if(in_msg.Type == RubyRequestType:FLUSH_Transition){//flush private data
+		} else  if(in_msg.Type == RubyRequestType:UPDATE){
+			 //@hxm*************************************************************************
+             // Check for data access to blocks in I-cache and ifetchs to blocks in D-cache
+		 	 Entry L1Dcache_entry := getL1DCacheEntry(in_msg.LineAddress);
+			 if (is_valid(L1Dcache_entry)) {
+					 if(L1Dcache_entry.Dirty){
+						trigger(Event:L1_UPDATE, in_msg.LineAddress,L1Dcache_entry, TBEs[in_msg.LineAddress]);//when data is dirty,writethrough
+					 }else{
+						trigger(Event:L1_UPDATE_clean, in_msg.LineAddress,L1Dcache_entry,TBEs[in_msg.LineAddress]); 
+					 }		
+			 }else {
+				 // Check to see if it is in the OTHER L1
+				 Entry L1Icache_entry := getL1ICacheEntry(in_msg.LineAddress);
+				 if (is_valid(L1Icache_entry)) {
+					 if(L1Icache_entry.Dirty){
+						 trigger(Event:L1_UPDATE, in_msg.LineAddress,L1Icache_entry, TBEs[in_msg.LineAddress]);////when data is dirty,writethrough,so L1_UPDATE = L1_FLUSH
+					 }
+					 else{ 
+						 trigger(Event:L1_UPDATE_clean, in_msg.LineAddress,L1Icache_entry, TBEs[in_msg.LineAddress]); 
+					 }
+				 }else{
+					    mandatoryQueue_in.dequeue();
+					    num_writethrough := num_writethrough + 1;
+						if(sequencer.getShareAddress_num() == num_writethrough){
+							sequencer.makeLockWriteRequest();
+							num_writethrough := 0;
+						}
+						assert(num_writethrough >= 0);
+					        assert(false);
+				 }
+			 }
+	    //@hxm*************************************************************************
+		}else  if(in_msg.Type == RubyRequestType:FLUSH_Transition){//flush private data
 	    //@hxm*************************************************************************
         // Check for data access to blocks in I-cache and ifetchs to blocks in D-cache
 		
@@ -866,6 +900,23 @@ machine(L1Cache, "MESI Directory L1 Cache CMP")
       }
     }
   }
+	action(g_issueUPS, "gup", desc="update data from the L2 cache") {
+		enqueue(requestL1Network_out, RequestMsg, l1_response_latency) {
+		  assert(is_valid(cache_entry));
+		  out_msg.Addr := address;
+		  out_msg.Type := CoherenceRequestType:UP;
+		  out_msg.DataBlk := cache_entry.DataBlk;
+		  out_msg.Dirty := cache_entry.Dirty;
+		  out_msg.Requestor:= machineID;
+		  out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+							  l2_select_low_bit, l2_select_num_bits, intToID(0)));
+		  if (cache_entry.Dirty) {
+			out_msg.MessageSize := MessageSizeType:Writeback_Data;
+		  } else {
+			out_msg.MessageSize := MessageSizeType:Writeback_Control;
+		  }
+		}
+	}
 //@hxm************************************************************************* 
   action(pb_issuePfGETX, "pb", desc="Issue prefetch GETX") {
       peek(optionalQueue_in, RubyRequest) {
@@ -1112,6 +1163,7 @@ machine(L1Cache, "MESI Directory L1 Cache CMP")
     DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
     sequencer.writeCallback(address, cache_entry.DataBlk);
     cache_entry.Dirty := true;
+    DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
   }
   action(hht_store_hitfromTBE, "\ht",
          desc="If not prefetch, notify sequencer that store completed.")
@@ -1128,6 +1180,7 @@ machine(L1Cache, "MESI Directory L1 Cache CMP")
     assert(is_valid(cache_entry));
     DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
     sequencer.writeCallback(address, cache_entry.DataBlk, true);
+    DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
     cache_entry.Dirty := true;
   }
 //hxm*************************************************************************    
@@ -1238,6 +1291,7 @@ machine(L1Cache, "MESI Directory L1 Cache CMP")
       assert(is_valid(cache_entry));
       cache_entry.DataBlk := in_msg.DataBlk;
       cache_entry.Dirty := in_msg.Dirty;
+      DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
     }
   }
 
@@ -1288,6 +1342,9 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
     stall_and_wait(mandatoryQueue_in, address);
   }
 
+  action(zz_stallAndWaitresponseL1Network, "zz", desc="recycle L1 request queue") {
+    stall_and_wait(responseL1Network_in, address);
+  }
   action(kd_wakeUpDependents, "kd", desc="wake-up dependents") {
     wakeUpBuffers(address);
   }
@@ -1369,7 +1426,36 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
     uu_profileDataReadMiss;
     uu_profileDataMiss;		
     k_popMandatoryQueue;
+  }
+
+  transition(V_P,{Locked_Read_PD,Locked_Read_PDP},V_P) {
+    hh_store_hit;
+	//dd_DelayWTRemove;//other way out so remove
+	//dd_delayedwritethrough;//pte add into delayedwritethrough
+	uu_profileDataHit;
+	k_popMandatoryQueue;
+  }
+  
+  transition(V_P,Locked_Read_PTE,V_P) {
+    hh_store_hitPTE;
+	dd_DelayWTRemove;//other way out so remove
+	//dd_delayedwritethrough;//pte add into delayedwritethrough
+	//uu_profileDataHit;
+	k_popMandatoryQueue;
+  }
+  
+  transition(V_P,Load,V_P) {
+	h_load_hit;
+	uu_profileDataHit;
+	hxm_setShare;
+	k_popMandatoryQueue;
   } 
+  transition(V_P,{Store,Store_T}) {
+    hh_store_hit;
+    hoo_setDirty;
+    uu_profileDataHit;
+    k_popMandatoryQueue;
+ }
   transition(V,{Locked_Read_PD,Locked_Read_PDP},I_P) {
     hoo_setDirty;
     i_allocateTBE;
@@ -1388,6 +1474,9 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
     uu_profileDataMiss;		
     k_popMandatoryQueue;
   } 
+  transition(V_WT_DELATY,Locked_Read_PTE){
+    z_stallAndWaitMandatoryQueue;
+  }
   transition(V,Locked_Read_PTE,I_PTE) {
     hoo_setDirty;
     i_allocateTBE;
@@ -1399,6 +1488,7 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
   transition(I_PTE,Data_M,V_P) {
     u_writeDataToL1Cache;
 	hh_store_hitPTE;
+	dd_delayedwritethrough;//pte add into delayedwritethrough
     s_deallocateTBE;
     o_popIncomingResponseQueue;
     kd_wakeUpDependents;
@@ -1406,11 +1496,14 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
 //Transitions NP for DATA
   transition(I_P,Data_M,V_P) {
     u_writeDataToL1Cache;
-	hhx_store_hit;
+	//hhx_store_hit;
+	hh_store_hit;
+	dd_delayedwritethrough;//pte add into delayedwritethrough
     s_deallocateTBE;
     o_popIncomingResponseQueue;
     kd_wakeUpDependents;
   }
+ // Transitions V_P for Write through
   transition(V_P,ST_Unblock,V_WT_PTE) {
 	msa_move_share_addr;
 	mpa_move_private_addr;
@@ -1420,6 +1513,24 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
 	uu_profileDataHit;
 	k_popMandatoryQueue;
   }
+  transition({V_P_R,V_WT_PTE},{Locked_Read_PD,Locked_Read_PDP,Locked_Read_PTE}) {
+   z_stallAndWaitMandatoryQueue;
+  }
+  transition(V_WT_PTE,Locked_Write){
+   z_stallAndWaitMandatoryQueue;
+  }
+  transition(V_P,Locked_Write,V_WT){
+    hh_store_hit;
+	i_allocateTBE;
+	msa_move_share_addr;
+	mpa_move_private_addr;
+	dd_DelayWTRemove;//other way out so remove
+	ub_issueWritethrough_unblock;
+	ff_deallocateL1CacheBlock;
+	uu_profileDataHit;
+	k_popMandatoryQueue;
+  }
+
   transition(V_P_R,ST_Unblock,V_WT_PTE) {
 	ur_issueWritethrough_unblockfromTBE;
 	k_popMandatoryQueue;
@@ -1428,7 +1539,7 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
   {
   	s_deallocateTBE;
 	o_popIncomingResponseQueue;
-    upf_updatePTEadressnum;
+	kd_wakeUpDependents;
   }
   transition(V_P,{L1_Replacement,L1_Replacement_clean},V_P_R){
   	msa_move_share_addr;
@@ -1459,7 +1570,7 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
   }
 //Locked_RMW_Write write data to L2Cache then unlocked
 //V_P state is for page table lookfor
-  transition({V,V_P},Locked_Write,V_WT){
+  transition(V,Locked_Write,V_WT){
     hh_store_hit;
 	i_allocateTBE;
 	msa_move_share_addr;
@@ -1518,7 +1629,7 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
   }
   transition(V_I,Inv)
   {
-	l_popRequestQueue;
+    zz_stallAndWaitresponseL1Network;
   }
 //********************end of DMA ********************************
 
@@ -1539,7 +1650,7 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
 // Transitions NP for DATA
   transition(I_D,Data_M,V_D) {
     u_writeDataToL1Cache;
-    hhx_store_hit;
+    hh_store_hit;
     dd_delayedwritethrough;//record delay writethrough address,1000cycle trigger WT
     s_deallocateTBE;
     o_popIncomingResponseQueue;
@@ -1611,7 +1722,7 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
   }
   
 //******************************end of share store*********************************** 
-  transition({V_I,V_WT,I_T},{Load,L1_FLUSH, Load_P,Locked_Read_PD,Locked_Read_PDP,Locked_Read_PTE,Locked_Read,Locked_Write,Ifetch,Ifetch_P, Store,Store_P,Store_T}) {
+  transition({V_I,V_WT,I_T},{Load,L1_FLUSH,L1_UPDATE,Load_P,Locked_Read_PD,Locked_Read_PDP,Locked_Read_PTE,Locked_Read,Locked_Write,Ifetch,Ifetch_P, Store,Store_P,Store_T}) {
 	z_stallAndWaitMandatoryQueue;
   }
  transition(I_P,{L1_Replacement,L1_Replacement_clean}) {
@@ -1749,7 +1860,7 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
   } 
   transition(I_T,Data_M,I) {
     u_writeDataToL1Cache;
-	hhx_store_hit;
+	hh_store_hit;
     msa_move_share_addr;
 	ff_deallocateL1CacheBlock;
 	s_deallocateTBE;
@@ -1759,12 +1870,11 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
   // Transitions NP for DATA
   transition(I,Data_M,V) {
     u_writeDataToL1Cache;
-	hhx_store_hit;
+	hh_store_hit;
     s_deallocateTBE;
     o_popIncomingResponseQueue;
     kd_wakeUpDependents;
-  }
-    
+  }    
   // Transitions NP for DATA
   transition(I,Data_R,V) {
     u_writeDataToL1Cache;
@@ -1773,15 +1883,14 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
     o_popIncomingResponseQueue;
 
   }
-
-// Transitions NP for DATA
+  // Transitions NP for DATA
   transition(V,L1_FLUSH,V_W) {
      i_allocateTBE;
      g_issueWTX;
      ff_deallocateL1CacheBlock;
 	 k_popMandatoryQueue;
   } 
-// Transitions NP for DATA
+  // Transitions NP for DATA
   transition(V_W,L2_WT_Ack,I) {
      mpa_move_private_addr;
      s_deallocateTBE;
@@ -1803,7 +1912,27 @@ action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
 	 k_popMandatoryQueue;
 	 usf_updatesharenum;
   }
-  
+//@hxm**********update*************** 
+  // Transitions NP for DATA
+  transition(V,L1_UPDATE,V_W) {
+     i_allocateTBE;
+     g_issueUPS;
+	 k_popMandatoryQueue;
+  }
+  transition(V_W,Data_R,V) {//don't insert share
+	mpa_move_private_addr;
+    u_writeDataToL1Cache;
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+	kd_wakeUpDependents;
+    usf_updatesharenum;
+  }     
+  transition(V,L1_UPDATE_clean,V_W) {
+	 i_allocateTBE;
+     g_issueUPS;
+	 k_popMandatoryQueue;
+  }
+//@hxm**********update**************** 
   // Transitions NP for DATA,private
   transition(V,L1_FLUSH_T,V_W_T) {
      g_issueWTX;

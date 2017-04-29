@@ -224,20 +224,29 @@ class BaseCPU : public MemObject
     {
 	    std::cout<<"in the base.hh triggerFetch don't implement"<<std::endl;
     }
-
     virtual bool triggerWritePacket()
     {
 	    std::cout<<"in the base.hh triggerWritePacket don't implement"<<std::endl;
 		return 0;
-    }
-	
+    }	
     virtual bool triggerReadPacket()
     {
 	    std::cout<<"in the base.hh triggerReadPacket don't implement"<<std::endl;
 		return 0;
     }
+	virtual void triggerITB()
+	{
+		std::cout<<"in the base.hh triggerITB don't implement"<<std::endl;
+	}
+	virtual void triggerDTBwrite()
+	{
+		std::cout<<"in the base.hh triggerDTBwrite don't implement"<<std::endl;
+	}
+	virtual void triggerDTBread()
+	{
+		std::cout<<"in the base.hh triggerDTBread don't implement"<<std::endl;
+	}	
 //@hxm*************************************************************************
-
     void
     postInterrupt(int int_num, int index)
     {
@@ -245,25 +254,21 @@ class BaseCPU : public MemObject
         if (FullSystem)
             wakeup();
     }
-
     void
     clearInterrupt(int int_num, int index)
     {
         interrupts->clear(int_num, index);
     }
-
     void
     clearInterrupts()
     {
         interrupts->clearAll();
     }
-
     bool
     checkInterrupts(ThreadContext *tc) const
     {
         return FullSystem && interrupts->checkInterrupts(tc);
     }
-
     class ProfileEvent : public Event
     {
       private:

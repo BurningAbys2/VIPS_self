@@ -76,6 +76,7 @@ machine(L2Cache, "MESI Directory L2 Cache CMP")
 	I_RMW_D,AccessPermission:Busy, desc="reciew L1 Lock request ,L2 cache LOCK waiting memory data for PDP";
 	I_RMW_T,AccessPermission:Busy, desc="reciew L1 Lock request ,L2 cache LOCK waiting memory data for PTE";
 	V_DMA,AccessPermission:Busy, desc="v state recieve the inv from dir";
+	V_DMA_V,AccessPermission:Busy, desc="recieve the inv from dir,there are data in cache";
   }
 
   // EVENTS
@@ -98,7 +99,8 @@ machine(L2Cache, "MESI Directory L2 Cache CMP")
 	L1_WT_blocked_PTE,	desc="L1 lock RMW read L1 valid, L2 blocked for PTE";
 	//write_through for share
 	L1_WT,desc="L1 share line then write_through";
-	
+	//update  data for share
+	L1_UP,desc="L1 share line then update";
     // events initiated by this L2
     L2_Replacement,     desc="L2 Replacement", format="!r";
     L2_Replacement_clean,     desc="L2 Replacement, but data is clean", format="!r";
@@ -254,7 +256,9 @@ machine(L2Cache, "MESI Directory L2 Cache CMP")
       return Event:L1_WT_unblock;
     } else if (type == CoherenceRequestType:WT) {
       return Event:L1_WT;
-    } else {
+    } else if (type == CoherenceRequestType:UP) {
+      return Event:L1_UP;
+    }else {
       DPRINTF(RubySlicc, "address: %s, Request Type: %s\n", addr, type);
       error("Invalid L1 forwarded request type");
     }
@@ -291,7 +295,7 @@ machine(L2Cache, "MESI Directory L2 Cache CMP")
   // Response  L2 Network - response msg to this particular L2 bank
   in_port(responseL2Network_in, ResponseMsg, responseToL2Cache, rank = 1) {
     if (responseL2Network_in.isReady()) {
-      peek(responseL2Network_in, ResponseMsg) {
+      peek(responseL2Network_in, ResponseMsg){
         // test wether it's from a local L1 or an off chip source
         assert(in_msg.Destination.isElement(machineID));
         Entry cache_entry := getCacheEntry(in_msg.Addr);
@@ -316,18 +320,32 @@ machine(L2Cache, "MESI Directory L2 Cache CMP")
         } else { // external message
           if(in_msg.Type == CoherenceResponseType:MEMORY_DATA) {
               trigger(Event:Mem_Data, in_msg.Addr, cache_entry, tbe);
-          } else if(in_msg.Type == CoherenceResponseType:MEMORY_ACK) {
+          }else if(in_msg.Type == CoherenceResponseType:MEMORY_ACK) {
               trigger(Event:Mem_Ack, in_msg.Addr, cache_entry, tbe);  
           }else if(in_msg.Type == CoherenceResponseType:INV) {
-              trigger(Event:MEM_Inv, in_msg.Addr, cache_entry, tbe);
+			  if(is_valid(cache_entry)){
+				trigger(Event:MEM_Inv, in_msg.Addr, cache_entry, tbe);
+			  }else{
+				if(L2cache.cacheAvail(in_msg.Addr)){
+					trigger(Event:MEM_Inv, in_msg.Addr, cache_entry, tbe);
+				}else{
+				  Entry L2cache_entry := getCacheEntry(L2cache.cacheProbe(in_msg.Addr));
+					if (isDirty(L2cache_entry)) {
+					  trigger(Event:L2_Replacement, L2cache.cacheProbe(in_msg.Addr),
+							  L2cache_entry, TBEs[L2cache.cacheProbe(in_msg.Addr)]);
+					} else {
+					  trigger(Event:L2_Replacement_clean, L2cache.cacheProbe(in_msg.Addr),
+							  L2cache_entry, TBEs[L2cache.cacheProbe(in_msg.Addr)]);
+					}				
+				}
+			  }
           }else {
             error("unknown message type");
           }
         }
-      }
-    }  // if not ready, do nothing
+      }  // if not ready, do nothing
+    }
   }
-
   // L1 Request
   in_port(L1RequestL2Network_in, RequestMsg, L1RequestToL2Cache, rank = 0) {
     DPRINTF(RubySlicc,"enter in_port\n");
@@ -419,7 +437,18 @@ machine(L2Cache, "MESI Directory L2 Cache CMP")
       out_msg.MessageSize := MessageSizeType:Response_Data;
     }
   }
-
+  action(cd_DMARequestFromTBE, "cd", desc="Send data to memory") {
+    enqueue(responseL2Network_out, ResponseMsg, l2_response_latency) {
+      assert(is_valid(tbe));
+      out_msg.Addr := address;
+      out_msg.Type := CoherenceResponseType:DMA_DATA;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(map_Address_to_Directory(address));
+      out_msg.DataBlk := tbe.DataBlk;
+      out_msg.Dirty := tbe.Dirty;
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+  }
   action(d_sendDataToRequestor, "d", desc="Send data from cache to reqeustor") {
     peek(L1RequestL2Network_in, RequestMsg) {
       enqueue(responseL2Network_out, ResponseMsg, l2_response_latency) {
@@ -430,6 +459,8 @@ machine(L2Cache, "MESI Directory L2 Cache CMP")
         out_msg.Destination.add(in_msg.Requestor);
         out_msg.DataBlk := cache_entry.DataBlk;
         out_msg.MessageSize := MessageSizeType:Response_Data;
+      DPRINTF(RubySlicc, "Address: %s, Destination: %s, DataBlock: %s\n",
+              out_msg.Addr, out_msg.Destination, out_msg.DataBlk);
       }
     }
   }
@@ -568,14 +599,14 @@ machine(L2Cache, "MESI Directory L2 Cache CMP")
     peek(responseL2Network_in, ResponseMsg) {
       assert(is_valid(cache_entry));
 	  cache_entry.DataBlk := in_msg.DataBlk;
-	  if(tbe.PDP){//no influence ,don't use
+	  /*if(tbe.PDP){//no influence ,don't use
 	    L2pagetable.recordEntryAddrss(address,cache_entry.DataBlk,tbe.L1_GetX_ID,true);
 		tbe.PDP := false;
 	  }
 	  else if(tbe.PTE){
 	    L2pagetable.recordEntryAddrss(address,cache_entry.DataBlk,tbe.L1_GetX_ID,false);
 		tbe.PTE := false;
-	  }
+	  }*/
       if (in_msg.Dirty) {
         cache_entry.Dirty := in_msg.Dirty;
       }
@@ -585,7 +616,10 @@ machine(L2Cache, "MESI Directory L2 Cache CMP")
   action(mr_writeDataToCacheFromRequest, "mr", desc="Write data from response queue to cache") {
     peek(L1RequestL2Network_in, RequestMsg) {
       assert(is_valid(cache_entry));
+      DPRINTF(RubySlicc, "DataBlock: %s\n",cache_entry.DataBlk);
 	  cache_entry.DataBlk.copyDirty(in_msg.DataBlk);  
+      DPRINTF(RubySlicc, "Address: %s, DataBlock: %s\n",
+              in_msg.Addr, cache_entry.DataBlk);
       if (in_msg.Dirty) {
         cache_entry.Dirty := in_msg.Dirty;
       }
@@ -712,7 +746,7 @@ machine(L2Cache, "MESI Directory L2 Cache CMP")
   transition(IV_RMW_DW,{L1_WT_blocked,L1_WT_blocked_PDP,L1_WT_blocked_PTE,L1_GETX_blocked,L1_GETX_blocked_PDP,L1_GETX_blocked_PTE}) {
 	zz_stallAndWaitL1RequestQueue;
   }
-  transition(IV_RMW_DW, Mem_Data,V) {
+  transition(IV_RMW_DW, Mem_Data, V) {
     m_writeDataToCache;
 	s_deallocateTBE;
     o_popIncomingResponseQueue;
@@ -796,89 +830,83 @@ machine(L2Cache, "MESI Directory L2 Cache CMP")
   
 //=========================Replacement=====================================
   //replacement keep all L2 cache keep the new data,let dir know
-  //if the data is private should send invalid
-  
-  transition(V, {L2_Replacement,L2_Replacement_clean},V_DMA) {
-    i_allocateTBE;
-	fp_sendInvToPrivater;
+  //@hxm***********2017/04/19*********************************
+  //we don't broadcast the inv to L1
+  //maybe L1 have dirty data,but we don't care
+  transition(V, L2_Replacement_clean,I){
     rr_deallocateL2CacheBlock;
-  } 
-  
+  }
+  transition(V, L2_Replacement,V_I) {
+    i_allocateTBE;
+	ct_exclusiveReplacementFromTBE;
+    rr_deallocateL2CacheBlock;
+  }
   transition(V_I, Mem_Ack, I) {
     s_deallocateTBE;
     o_popIncomingResponseQueue;
     kd_wakeUpDependents;
   }
-  
 //==============================DMA===========================================
  //for DMA reques ,V_RMW be locked
- transition(V_RMW,MEM_Inv) {
+ transition({V_RMW,V_I},MEM_Inv) {
    zz_stallAndWaitL1RequestQueue;
- } 
- //V_I,be replacing
- transition(V_I,MEM_Inv) {
-   o_popIncomingResponseQueue;
- }
- 
+ }  
  //There are two choices,the first is private data,another is share data
- transition(V,MEM_Inv,V_DMA) {
+ transition(V,MEM_Inv,V_DMA_V) {
     i_allocateTBE;
 	fp_sendInvToPrivater;
-    rr_deallocateL2CacheBlock;
+    //rr_deallocateL2CacheBlock;
 	o_popIncomingResponseQueue;
-  } 
-  
+  }  
+ transition({I,NP},MEM_Inv,V_DMA) {
+    qq_allocateL2CacheBlock;
+    i_allocateTBE;
+	fp_sendInvToPrivater;
+	o_popIncomingResponseQueue;
+  }  
  //the second one is send INV to L1,L1 return the DATA(clean OR dirty)
- transition(V_DMA,WB_Data){
+ transition({V_DMA_V,V_DMA},WB_Data,V_DMA_V){
     q_updateAck;
     qq_writeDataToTBE;
     o_popIncomingResponseQueue;
  }
- transition(V_DMA,Ack){
+ transition({V_DMA_V,V_DMA},Ack){
     q_updateAck;
     o_popIncomingResponseQueue;
  }
- transition(V_DMA,WB_Data_last,V_I){
+ transition({V_DMA_V,V_DMA},WB_Data_last,I){//have data in cache
     qq_writeDataToTBE;
-	ct_exclusiveReplacementFromTBE;
+	cd_DMARequestFromTBE;
+	s_deallocateTBE;
+	rr_deallocateL2CacheBlock;
     o_popIncomingResponseQueue;
  }
- transition(V_DMA,Ack_all,V_I){
-    ct_exclusiveReplacementFromTBE;
+ transition(V_DMA_V,Ack_all,I){//have data in cache
+    cd_DMARequestFromTBE;
+	s_deallocateTBE;
+	rr_deallocateL2CacheBlock;
     o_popIncomingResponseQueue;
  }
- transition(V_DMA,L1_PUTX,V_I)
+ transition(V_DMA,Ack_all,I){//no data in cache
+	c_exclusiveCleanReplacement;
+	s_deallocateTBE;
+	rr_deallocateL2CacheBlock;
+    o_popIncomingResponseQueue;
+ }
+transition({V_DMA,V_DMA_V},L1_PUTX,V_DMA_V)
  {
 	qq_writeDataToTBE;
 	t_sendWBAck;
-	ct_exclusiveReplacementFromTBE;	
 	jj_popL1RequestQueue;
- } 
-//The one is sending MEMORY_DATA to directory
-/* transition(V_DMA,Mem_Ack,I) {
-	s_deallocateTBE;
-    o_popIncomingResponseQueue;
-    kd_wakeUpDependents;
  }
- //the second one is send INV to L1,L1 return the DATA(clean OR dirty)
- transition(V_DMA,WB_Data,V_I){
-    qq_writeDataToTBE;
-    ct_exclusiveReplacementFromTBE;
-    o_popIncomingResponseQueue;
- } 
- transition(V_DMA,{WB_Data_clean,Ack},V_I){
-    ct_exclusiveReplacementFromTBE;
-    o_popIncomingResponseQueue;
- }
-*/
 //=============================================================================  	
   transition(I_V, MEM_Inv) {
 	zz_stallAndWaitL1RequestQueue;
   }
-  transition({V_I,I_V}, {L1_GETS, L1_GET_INSTR,L1_GETX,L1_GETX_blocked,L1_GETX_blocked_PDP,L1_GETX_blocked_PTE,L1_PUTX,L2_Replacement,L2_Replacement_clean,L1_WT}) {
+  transition({V_I,I_V}, {L1_GETS, L1_GET_INSTR,L1_GETX,L1_GETX_blocked,L1_GETX_blocked_PDP,L1_GETX_blocked_PTE,L1_PUTX,L2_Replacement,L2_Replacement_clean,L1_WT,L1_UP}) {
     zz_stallAndWaitL1RequestQueue;
   } 
-  transition(V_DMA,{L1_GETS, L1_GET_INSTR,L1_GETX,L1_GETX_blocked,L1_GETX_blocked_PDP,L1_GETX_blocked_PTE,L2_Replacement,L2_Replacement_clean,L1_WT}){
+  transition(V_DMA,{L1_GETS, L1_GET_INSTR,L1_GETX,L1_GETX_blocked,L1_GETX_blocked_PDP,L1_GETX_blocked_PTE,L2_Replacement,L2_Replacement_clean,L1_WT,L1_UP}){
   	zz_stallAndWaitL1RequestQueue
   }
   transition(V, L1_PUTX, V) {
@@ -891,9 +919,16 @@ machine(L2Cache, "MESI Directory L2 Cache CMP")
 	tt_sendWTAck;
     jj_popL1RequestQueue;
   }
-  /*transition({NP,I},L1_PUTX,V_PUT) {
+//@hxm********update 2017/04/21*********
+  transition(V, L1_UP, V) {
+    mr_writeDataToCacheFromRequest;	
+	d_sendDataToRequestor;
+	//tt_sendWTAck;
+    jj_popL1RequestQueue;
+  }
+//@hxm********update 2017/04/21*********
+  transition({NP,I},L1_PUTX,V_PUT) {
     qq_allocateL2CacheBlock;
-	i_allocateTBE;
 	a_issueFetchToMemory;
 	zz_stallAndWaitL1RequestQueue;
   }
@@ -904,8 +939,12 @@ machine(L2Cache, "MESI Directory L2 Cache CMP")
   }
   transition({NP,I},L1_WT,V_PUT) {
     qq_allocateL2CacheBlock;
-	i_allocateTBE;
 	a_issueFetchToMemory;
 	zz_stallAndWaitL1RequestQueue;
-  }*/
+  }
+  transition({NP,I},L1_UP,V_PUT) {
+    qq_allocateL2CacheBlock;
+	a_issueFetchToMemory;
+	zz_stallAndWaitL1RequestQueue;
+  }
 }

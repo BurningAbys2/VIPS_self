@@ -142,6 +142,7 @@ enumeration(RubyRequestType, desc="...", default="RubyRequestType_NULL") {
   COMMIT,            desc="Commit version";
   NULL,              desc="Invalid request type";
   FLUSH,             desc="Flush request type";
+  UPDATE, 			 desc="Update request type";
   FLUSH_Transition,	 desc="Flush request type for transition";
   FLUSH_I,	 		 desc="Flush request type for transition";
   ST_T,				 desc="Flush request type for ldst test";

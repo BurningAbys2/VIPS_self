@@ -74,6 +74,7 @@ FSTranslatingPortProxy::~FSTranslatingPortProxy()
 void
 FSTranslatingPortProxy::readBlob(Addr addr, uint8_t *p, int size) const
 {
+    std::cout<<"enter fstranslatingPortProxy.cc**************readBlob"<<std::endl;
     Addr paddr;
     for (ChunkGenerator gen(addr, size, TheISA::PageBytes); !gen.done();
          gen.next())
@@ -86,11 +87,13 @@ FSTranslatingPortProxy::readBlob(Addr addr, uint8_t *p, int size) const
         PortProxy::readBlob(paddr, p, gen.size());
         p += gen.size();
     }
+    std::cout<<"leave fstranslatingPortProxy.cc******************readBlob"<<std::endl;
 }
 
 void
 FSTranslatingPortProxy::writeBlob(Addr addr, const uint8_t *p, int size) const
 {
+    std::cout<<"enter fstranslatingPortProxy.cc*****************writeBlob"<<std::endl;
     Addr paddr;
     for (ChunkGenerator gen(addr, size, TheISA::PageBytes); !gen.done();
          gen.next())
@@ -103,11 +106,13 @@ FSTranslatingPortProxy::writeBlob(Addr addr, const uint8_t *p, int size) const
         PortProxy::writeBlob(paddr, p, gen.size());
         p += gen.size();
     }
+    std::cout<<"leave fstranslatingPortProxy.cc*****************writeBlob"<<std::endl;
 }
 
 void
 FSTranslatingPortProxy::memsetBlob(Addr address, uint8_t v, int size) const
 {
+    std::cout<<"enter fstranslatingPortProxy.cc*****************memsetBlob"<<std::endl;
     Addr paddr;
     for (ChunkGenerator gen(address, size, TheISA::PageBytes); !gen.done();
          gen.next())
@@ -119,20 +124,25 @@ FSTranslatingPortProxy::memsetBlob(Addr address, uint8_t v, int size) const
 
         PortProxy::memsetBlob(paddr, v, gen.size());
     }
+    std::cout<<"leave fstranslatingPortProxy.cc*****************memsetBlob"<<std::endl;
 }
 
 void
 CopyOut(ThreadContext *tc, void *dest, Addr src, size_t cplen)
 {
+    std::cout<<"enter fstranslatingPortProxy.cc*****************CopyOut"<<std::endl;
     uint8_t *dst = (uint8_t *)dest;
     tc->getVirtProxy().readBlob(src, dst, cplen);
+    std::cout<<"leave fstranslatingPortProxy.cc*****************CopyOut"<<std::endl;
 }
 
 void
 CopyIn(ThreadContext *tc, Addr dest, const void *source, size_t cplen)
 {
+    std::cout<<"enter fstranslatingPortProxy.cc*****************CopyIn"<<std::endl;
     uint8_t *src = (uint8_t *)source;
     tc->getVirtProxy().writeBlob(dest, src, cplen);
+    std::cout<<"enter fstranslatingPortProxy.cc*****************CopyIn"<<std::endl;
 }
 
 void

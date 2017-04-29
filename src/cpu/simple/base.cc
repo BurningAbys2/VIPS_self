@@ -330,6 +330,7 @@ change_thread_state(ThreadID tid, int activate, int priority)
 Addr
 BaseSimpleCPU::dbg_vtophys(Addr addr)
 {
+    std::cout<<"enter in base.cc************************ dbg_vtophys."<<std::endl;
     return vtophys(tc, addr);
 }
 

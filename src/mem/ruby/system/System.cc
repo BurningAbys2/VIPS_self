@@ -379,8 +379,17 @@ RubySystem::functionalRead(PacketPtr pkt)
                  access_perm == AccessPermission_NotPresent)
             num_invalid++;
     }
-    assert(num_rw <= 1);
-
+    //assert(num_rw <= 1);
+     for (unsigned int i = 0; i < num_controllers; ++i) {
+        access_perm = m_abs_cntrl_vec[i]-> getAccessPermission(line_address);
+        if (access_perm != AccessPermission_Invalid &&
+                 access_perm != AccessPermission_NotPresent && 
+                 m_abs_cntrl_vec[i]->getType()== MachineType_L2Cache)
+         {       
+		 m_abs_cntrl_vec[i]->functionalRead(line_address, pkt);
+                 return true;
+	 }
+    }
     // This if case is meant to capture what happens in a Broadcast/Snoop
     // protocol where the block does not exist in the cache hierarchy. You
     // only want to read from the Backing_Store memory if there is no copy in
@@ -398,7 +407,7 @@ RubySystem::functionalRead(PacketPtr pkt)
                 return true;
             }
         }
-    } else if (num_ro > 0 || num_rw == 1) {
+    } else{
         // In Broadcast/Snoop protocols, this covers if you know the block
         // exists somewhere in the caching hierarchy, then you want to read any
         // valid RO or RW block.  In directory protocols, same thing, you want
