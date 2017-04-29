@@ -1,0 +1,1837 @@
+/*
+ * Copyright (c) 1999-2013 Mark D. Hill and David A. Wood
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are
+ * met: redistributions of source code must retain the above copyright
+ * notice, this list of conditions and the following disclaimer;
+ * redistributions in binary form must reproduce the above copyright
+ * notice, this list of conditions and the following disclaimer in the
+ * documentation and/or other materials provided with the distribution;
+ * neither the name of the copyright holders nor the names of its
+ * contributors may be used to endorse or promote products derived from
+ * this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+machine(L1Cache, "MESI Directory L1 Cache CMP")
+ : Sequencer * sequencer;
+   CacheMemory * L1Icache;
+   CacheMemory * L1Dcache;
+   Prefetcher * prefetcher;
+   int l2_select_num_bits;
+   int num_writethrough :=0;
+   Cycles l1_request_latency := 2;
+   Cycles l1_response_latency := 2;
+   Cycles to_l2_latency := 1;
+   bool send_evictions;
+   bool enable_prefetch := "False";
+
+   // Message Queues
+   // From this node's L1 cache TO the network
+
+   // a local L1 -> this L2 bank, currently ordered with directory forwarded requests
+   MessageBuffer * requestFromL1Cache, network="To", virtual_network="0",
+        ordered="false", vnet_type="request";
+
+   // a local L1 -> this L2 bank
+   MessageBuffer * responseFromL1Cache, network="To", virtual_network="1",
+        ordered="false", vnet_type="response";
+
+   MessageBuffer * unblockFromL1Cache, network="To", virtual_network="2",
+        ordered="false", vnet_type="unblock";
+
+
+   // To this node's L1 cache FROM the network
+   // a L2 bank -> this L1
+   MessageBuffer * requestToL1Cache, network="From", virtual_network="2",
+        ordered="false", vnet_type="request";
+
+   // a L2 bank -> this L1
+   MessageBuffer * responseToL1Cache, network="From", virtual_network="1",
+        ordered="false", vnet_type="response";
+{
+  // Request Buffer for prefetches
+  MessageBuffer optionalQueue, ordered="false";
+
+  // STATES
+  state_declaration(State, desc="Cache states", default="L1Cache_State_I") {
+    // Base states
+    NP, AccessPermission:Invalid, desc="Not present in either cache";
+    I, AccessPermission:Invalid, desc="a L1 cache entry Idle";
+    V, AccessPermission:Read_Only, desc="a L1 cache entry Shared";
+
+	//Replace
+	V_I,AccessPermission:Busy, desc="L1 replacing, waiting for WB_ACK";
+	
+    //Lock RMW
+	I_R,AccessPermission:Busy, desc="L1 lock RMW getx,waiting for DATA";
+    V_M ,AccessPermission:Read_Write,desc="L1 lock RMW Modify,then WT_unblock";
+	
+	//Page table
+	I_P,AccessPermission:Busy, desc="L1 PDP,PD,read,wait data";
+	I_PTE,AccessPermission:Busy, desc="L1 PTE,read,wait data";
+	V_P,AccessPermission:Busy, desc="L1 PDP,PD,PTE,read,unlock";
+ 
+   //
+    V_WT,AccessPermission:Busy, desc="Locked_RMW_Write,writethrough waiting WT_ACK";
+	V_WT_L,AccessPermission:Busy, desc="flush last address,writethrough waiting WT_ACK";
+	V_WT_PTE,AccessPermission:Busy, desc="UNBLOCK  address,writethrough waiting WT_ACK";
+	V_WT_DELATY,AccessPermission:Busy, desc="UNBLOCK  address,delay writethrough waiting WT_ACK";
+	
+	V_W,AccessPermission:Busy, desc="flush address,writethrough waiting WT_ACK";
+	V_D,AccessPermission:Read_Write, desc="share data delay_WT";
+    V_W_T,AccessPermission:Busy, desc="flush address for transition,writethrough waiting WT_ACK";
+	V_P_R,AccessPermission:Busy, desc="replace V_P";
+   //
+	I_D,AccessPermission:Busy, desc="share data getx,wait data";
+	I_T,AccessPermission:Busy, desc="test read share data getx,wait data";
+   }
+
+  // EVENTS
+  enumeration(Event, desc="Cache events") {
+    // L1 events
+    Load,	         desc="Load request from the home processor";
+    Load_P,          desc="Load_P";
+    Ifetch,          desc="I-fetch request from the home processor";
+    Ifetch_P,        desc="I-fetch_P request from the home processor";
+    Store,           desc="Store request from the home processor";
+    Store_P,         desc="Store_P request from the home processor";
+	Store_T,	     desc="Store_T request from the home processor";
+    //L1 evets for Lock RMW
+    Locked_Write,	 desc="Locked_RMW_Write from the home processor then unblock the LLC";
+	Locked_Read,	 desc="Locked_RMW_Read from the home processor then block the LLC";
+	
+    Locked_Write_P,  desc="Locked_RMW_Write from the home processor then unblock the LLC";
+	Locked_Read_P,	 desc="Locked_RMW_Read from the home processor then block the LLC";
+	
+	Locked_Read_PD,	desc="Locked_RMW_Read from the home processor for pte then block the LLC";
+	Locked_Read_PDP,desc="Locked_RMW_Read from the home processor for pte then block the LLC";
+	Locked_Read_PTE,desc="Locked_RMW_Read from the home processor for pte then block the LLC";
+	ST_Unblock,	desc="Locked_RMW_Read from the home processor for pte then unblock the LLC";
+	
+	//L1 events
+    L1_FLUSH,desc="flush synchronization";
+	L1_UPDATE,desc="update synchronization";
+    L1_FLUSH_clean,desc="flush synchronization";
+	L1_UPDATE_clean,desc="update synchronization";
+	
+	L1_FLUSH_T_clean,	  desc="flush transition point";
+	L1_FLUSH_T,			  desc="flush transition point";
+    // internal generated request
+    L1_Replacement,       desc="L1 Replacement for dirty data";
+	L1_Replacement_clean, desc="L1 Replacement for clean data";	
+
+	
+    Data_M,            desc="Data for processor store";
+	Data_R,            desc="Data for processor read";
+    SelfInv,           desc="Invalidate request from the home processor";
+    FLUSH,	           desc="flush when transition between private and share";
+  
+    L2_WB_Ack,	         desc="ACk for replacement";
+    L2_WT_Ack,			desc="ACK for writethrough";
+	L2_WT_Ack_last,		desc="flush synchrozition the last one";
+	
+    PF_Load,         desc="load request from prefetcher";
+    PF_Ifetch,       desc="instruction fetch request from prefetcher";
+    PF_Store,        desc="exclusive load request from prefetcher";
+	Inv,desc="for DMA or L2replacement to invalidate L1 private data";
+  }
+
+  // TYPES
+
+  // CacheEntry
+  structure(Entry, desc="...", interface="AbstractCacheEntry" ) {
+    State CacheState,        desc="cache state";
+    DataBlock DataBlk,       desc="data for the block";
+    bool Dirty, default="false",   desc="data is dirty";
+    bool Private,default="true",   desc="data is private";
+    bool isPrefetch, desc="Set if this block was prefetched";
+  }
+
+  // TBE fields
+  structure(TBE, desc="...") {
+    Address Addr,              desc="Physical address for this TBE";
+    State TBEState,        desc="Transient state";
+    DataBlock DataBlk,                desc="Buffer for the data block";
+    bool Dirty, default="false",   desc="data is dirty";
+	bool Private,default="true",   desc="data is private";
+    bool isPrefetch,       desc="Set if this was caused by a prefetch";
+  }
+
+  structure(TBETable, external="yes") {
+    TBE lookup(Address);
+    void allocate(Address);
+    void deallocate(Address);
+    bool isPresent(Address);
+  }
+
+  TBETable TBEs, template="<L1Cache_TBE>", constructor="m_number_of_TBEs";
+
+  MessageBuffer mandatoryQueue, ordered="false";
+
+  int l2_select_low_bit, default="RubySystem::getBlockSizeBits()";
+
+  void set_cache_entry(AbstractCacheEntry a);
+  void unset_cache_entry();
+  void set_tbe(TBE a);
+  void unset_tbe();
+  void wakeUpBuffers(Address a);
+  void profileMsgDelay(int virtualNetworkType, Cycles c);
+
+  // inclusive cache returns L1 entries only
+  Entry getCacheEntry(Address addr), return_by_pointer="yes" {
+    Entry L1Dcache_entry := static_cast(Entry, "pointer", L1Dcache[addr]);
+    if(is_valid(L1Dcache_entry)) {
+      return L1Dcache_entry;
+    }
+
+    Entry L1Icache_entry := static_cast(Entry, "pointer", L1Icache[addr]);
+    return L1Icache_entry;
+  }
+
+  Entry getL1DCacheEntry(Address addr), return_by_pointer="yes" {
+    Entry L1Dcache_entry := static_cast(Entry, "pointer", L1Dcache[addr]);
+    return L1Dcache_entry;
+  }
+
+  Entry getL1ICacheEntry(Address addr), return_by_pointer="yes" {
+    Entry L1Icache_entry := static_cast(Entry, "pointer", L1Icache[addr]);
+    return L1Icache_entry;
+  }
+
+  State getState(TBE tbe, Entry cache_entry, Address addr) {
+    assert((L1Dcache.isTagPresent(addr) && L1Icache.isTagPresent(addr)) == false);
+
+    if(is_valid(tbe)) {
+      return tbe.TBEState;
+    } else if (is_valid(cache_entry)) {
+      return cache_entry.CacheState;
+    }
+    return State:NP;
+  }
+
+  void setState(TBE tbe, Entry cache_entry, Address addr, State state) {
+    assert((L1Dcache.isTagPresent(addr) && L1Icache.isTagPresent(addr)) == false);
+
+    // MUST CHANGE
+    if(is_valid(tbe)) {
+      tbe.TBEState := state;
+    }
+    if (is_valid(cache_entry)) {
+      cache_entry.CacheState := state;
+    }
+  }
+
+  AccessPermission getAccessPermission(Address addr) {
+    TBE tbe := TBEs[addr];
+    if(is_valid(tbe)) {
+      DPRINTF(RubySlicc, "%s\n", L1Cache_State_to_permission(tbe.TBEState));
+      return L1Cache_State_to_permission(tbe.TBEState);
+    }
+
+    Entry cache_entry := getCacheEntry(addr);
+    if(is_valid(cache_entry)) {
+      DPRINTF(RubySlicc, "%s\n", L1Cache_State_to_permission(cache_entry.CacheState));
+      return L1Cache_State_to_permission(cache_entry.CacheState);
+    }
+
+    DPRINTF(RubySlicc, "%s\n", AccessPermission:NotPresent);
+    return AccessPermission:NotPresent;
+  }
+
+  void functionalRead(Address addr, Packet *pkt) {
+    TBE tbe := TBEs[addr];
+    if(is_valid(tbe)) {
+      testAndRead(addr, tbe.DataBlk, pkt);
+    } else {
+      testAndRead(addr, getCacheEntry(addr).DataBlk, pkt);
+    }
+  }
+
+  int functionalWrite(Address addr, Packet *pkt) {
+    int num_functional_writes := 0;
+
+    TBE tbe := TBEs[addr];
+    if(is_valid(tbe)) {
+      num_functional_writes := num_functional_writes +
+        testAndWrite(addr, tbe.DataBlk, pkt);
+      return num_functional_writes;
+    }
+
+    num_functional_writes := num_functional_writes +
+        testAndWrite(addr, getCacheEntry(addr).DataBlk, pkt);
+    return num_functional_writes;
+  }
+
+  void setAccessPermission(Entry cache_entry, Address addr, State state) {
+    if (is_valid(cache_entry)) {
+      cache_entry.changePermission(L1Cache_State_to_permission(state));
+    }
+  }
+
+  Event mandatory_request_type_to_event(RubyRequestType type) {
+    if (type == RubyRequestType:LD_P) {
+      return Event:Load_P;
+    }else if (type == RubyRequestType:LD) {
+      return Event:Load;
+    }else if (type == RubyRequestType:IFETCH_P) {
+      return Event:Ifetch_P;
+    }else if (type == RubyRequestType:IFETCH) {
+      return Event:Ifetch;
+    }else if (type == RubyRequestType:ST_P) {
+      return Event:Store_P;
+    }else if ((type == RubyRequestType:ST) || (type == RubyRequestType:ATOMIC)) {
+      return Event:Store;
+    }else if ((type == RubyRequestType:Locked_RMW_Write) || (type == RubyRequestType:ST_PTE)){
+      return Event:Locked_Write;	
+	}else if (type == RubyRequestType:ST_Unblock){
+      return Event:ST_Unblock;	
+	}else if (type == RubyRequestType:LD_PD) {
+      return Event:Locked_Read_PD;
+    }else if (type == RubyRequestType:LD_PTE) {
+      return Event:Locked_Read_PTE;
+    }else if (type == RubyRequestType:LD_PDP) {
+      return Event:Locked_Read_PDP;
+    }else if (type == RubyRequestType:Locked_RMW_Read){						
+	  return Event:Locked_Read;	
+	}else if (type == RubyRequestType:ST_T) {
+      return Event:Store_T;
+    }else if (type == RubyRequestType:FLUSH) {
+      return Event:L1_FLUSH;
+    }else {
+      error("Invalid RubyRequestType");
+    }
+  }
+  Event prefetch_request_type_to_event(RubyRequestType type) {
+      if (type == RubyRequestType:LD) {
+          return Event:PF_Load;
+      } else if (type == RubyRequestType:IFETCH) {
+          return Event:PF_Ifetch;
+      } else if ((type == RubyRequestType:ST) ||
+                 (type == RubyRequestType:ATOMIC)) {
+          return Event:PF_Store;
+      } else {
+          error("Invalid RubyRequestType");
+      }
+  }
+
+  out_port(requestL1Network_out, RequestMsg, requestFromL1Cache);
+  out_port(responseL1Network_out, ResponseMsg, responseFromL1Cache);
+  out_port(unblockNetwork_out, ResponseMsg, unblockFromL1Cache);
+  out_port(optionalQueue_out, RubyRequest, optionalQueue);
+
+
+  // Prefetch queue between the controller and the prefetcher
+  // As per Spracklen et al. (HPCA 2005), the prefetch queue should be
+  // implemented as a LIFO structure.  The structure would allow for fast
+  // searches of all entries in the queue, not just the head msg. All
+  // msgs in the structure can be invalidated if a demand miss matches.
+  in_port(optionalQueue_in, RubyRequest, optionalQueue, desc="...", rank = 3) {
+      if (optionalQueue_in.isReady()) {
+          peek(optionalQueue_in, RubyRequest) {
+              // Instruction Prefetch
+              if (in_msg.Type == RubyRequestType:IFETCH) {
+                  Entry L1Icache_entry := getL1ICacheEntry(in_msg.LineAddress);
+                  if (is_valid(L1Icache_entry)) {
+                      // The block to be prefetched is already present in the
+                      // cache. We should drop this request.
+                      trigger(prefetch_request_type_to_event(in_msg.Type),
+                              in_msg.LineAddress,
+                              L1Icache_entry, TBEs[in_msg.LineAddress]);
+                  }
+
+                  // Check to see if it is in the OTHER L1
+                  Entry L1Dcache_entry := getL1DCacheEntry(in_msg.LineAddress);
+                  if (is_valid(L1Dcache_entry)) {
+                      // The block is in the wrong L1 cache. We should drop
+                      // this request.
+                      trigger(prefetch_request_type_to_event(in_msg.Type),
+                              in_msg.LineAddress,
+                              L1Dcache_entry, TBEs[in_msg.LineAddress]);
+                  }
+
+                  if (L1Icache.cacheAvail(in_msg.LineAddress)) {
+                      // L1 does't have the line, but we have space for it
+                      // in the L1 so let's see if the L2 has it
+                      trigger(prefetch_request_type_to_event(in_msg.Type),
+                              in_msg.LineAddress,
+                              L1Icache_entry, TBEs[in_msg.LineAddress]);
+                  } else {
+                      // No room in the L1, so we need to make room in the L1
+                      trigger(Event:L1_Replacement,
+                              L1Icache.cacheProbe(in_msg.LineAddress),
+                              getL1ICacheEntry(L1Icache.cacheProbe(in_msg.LineAddress)),
+                              TBEs[L1Icache.cacheProbe(in_msg.LineAddress)]);
+                  }
+              } else {
+                  // Data prefetch
+                  Entry L1Dcache_entry := getL1DCacheEntry(in_msg.LineAddress);
+                  if (is_valid(L1Dcache_entry)) {
+                      // The block to be prefetched is already present in the
+                      // cache. We should drop this request.
+                      trigger(prefetch_request_type_to_event(in_msg.Type),
+                              in_msg.LineAddress,
+                              L1Dcache_entry, TBEs[in_msg.LineAddress]);
+                  }
+
+                  // Check to see if it is in the OTHER L1
+                  Entry L1Icache_entry := getL1ICacheEntry(in_msg.LineAddress);
+                  if (is_valid(L1Icache_entry)) {
+                      // The block is in the wrong L1. Just drop the prefetch
+                      // request.
+                      trigger(prefetch_request_type_to_event(in_msg.Type),
+                              in_msg.LineAddress,
+                              L1Icache_entry, TBEs[in_msg.LineAddress]);
+                  }
+
+                  if (L1Dcache.cacheAvail(in_msg.LineAddress)) {
+                      // L1 does't have the line, but we have space for it in
+                      // the L1 let's see if the L2 has it
+                      trigger(prefetch_request_type_to_event(in_msg.Type),
+                              in_msg.LineAddress,
+                              L1Dcache_entry, TBEs[in_msg.LineAddress]);
+                  } else {
+                      // No room in the L1, so we need to make room in the L1
+                      trigger(Event:L1_Replacement,
+                              L1Dcache.cacheProbe(in_msg.LineAddress),
+                              getL1DCacheEntry(L1Dcache.cacheProbe(in_msg.LineAddress)),
+                              TBEs[L1Dcache.cacheProbe(in_msg.LineAddress)]);
+                  }
+              }
+          }
+      }
+  }
+
+  // Response  L1 Network - response msg to this L1 cache
+  in_port(responseL1Network_in, ResponseMsg, responseToL1Cache, rank = 2) {
+    if (responseL1Network_in.isReady()) {
+      peek(responseL1Network_in, ResponseMsg, block_on="Addr") {
+        assert(in_msg.Destination.isElement(machineID));
+        Entry cache_entry := getCacheEntry(in_msg.Addr);
+        TBE tbe := TBEs[in_msg.Addr];
+		if(in_msg.Type == CoherenceResponseType:DATA) {
+           if(cache_entry.Dirty){
+		   trigger(Event:Data_M, in_msg.Addr, cache_entry, tbe);
+		   }else{
+		   trigger(Event:Data_R, in_msg.Addr, cache_entry, tbe);
+		   }
+		} else if (in_msg.Type == CoherenceResponseType:WB_ACK) {
+           trigger(Event:L2_WB_Ack, in_msg.Addr, cache_entry, tbe);
+        } else if (in_msg.Type == CoherenceResponseType:WT_ACK) {
+		   trigger(Event:L2_WT_Ack, in_msg.Addr, cache_entry, tbe);
+        } 
+		else {
+          error("Invalid L1 response type");
+        }
+      }
+    }
+  }
+
+  // Request InterChip network - request from this L1 cache to the shared L2
+  // for the DMA to access the private data
+  in_port(requestL1Network_in, RequestMsg, requestToL1Cache, rank = 1) {
+    if(requestL1Network_in.isReady()) {
+      peek(requestL1Network_in, RequestMsg, block_on="Addr") {
+        assert(in_msg.Destination.isElement(machineID));
+		Entry cache_entry := getCacheEntry(in_msg.Addr);
+        TBE tbe := TBEs[in_msg.Addr];
+		if(in_msg.Type == CoherenceRequestType:INV){
+		 trigger(Event:Inv, in_msg.Addr, cache_entry, tbe);
+		}else{
+			error("Invalid forwarded request type");
+		}
+      }
+    }
+  }
+
+  // Mandatory Queue betweens Node's CPU and it's L1 caches
+  in_port(mandatoryQueue_in, RubyRequest, mandatoryQueue, desc="...", rank = 0) {
+    if (mandatoryQueue_in.isReady()) {
+      peek(mandatoryQueue_in, RubyRequest, block_on="LineAddress") {
+	    DPRINTF(RubySlicc, "trigger mandatory.\n");
+		if(in_msg.Type == RubyRequestType:FLUSH_I){
+		  mandatoryQueue_in.dequeue();
+		  sequencer.flushCallback();
+		}else if(in_msg.Type == RubyRequestType:IFETCH_P || in_msg.Type == RubyRequestType:IFETCH){		
+          // ** INSTRUCTION ACCESS ***		  
+          Entry L1Icache_entry := getL1ICacheEntry(in_msg.LineAddress);
+          if (is_valid(L1Icache_entry)) {
+            // The tag matches for the L1, so the L1 asks the L2 for it.
+            trigger(mandatory_request_type_to_event(in_msg.Type), in_msg.LineAddress,
+                    L1Icache_entry, TBEs[in_msg.LineAddress]);
+          } else {
+		  
+            // Check to see if it is in the OTHER L1
+            Entry L1Dcache_entry := getL1DCacheEntry(in_msg.LineAddress);
+            if (is_valid(L1Dcache_entry)) {
+              // The block is in the wrong L1, put the request on the queue to the shared L2
+			  if(L1Dcache_entry.Dirty){
+				  trigger(Event:L1_Replacement, in_msg.LineAddress,
+						  L1Dcache_entry, TBEs[in_msg.LineAddress]);
+			  }else{
+				  trigger(Event:L1_Replacement_clean, in_msg.LineAddress,
+						  L1Dcache_entry, TBEs[in_msg.LineAddress]);			  		  
+			  }
+            }
+            if (L1Icache.cacheAvail(in_msg.LineAddress)) {
+              // L1 does't have the line, but we have space for it
+              // in the L1 so let's see if the L2 has it.
+              trigger(mandatory_request_type_to_event(in_msg.Type), in_msg.LineAddress,
+                      L1Icache_entry, TBEs[in_msg.LineAddress]);
+            } else {
+              // No room in the L1, so we need to make room in the L1,usual the instruction don't modify
+              trigger(Event:L1_Replacement_clean, L1Icache.cacheProbe(in_msg.LineAddress),
+                      getL1ICacheEntry(L1Icache.cacheProbe(in_msg.LineAddress)),
+                      TBEs[L1Icache.cacheProbe(in_msg.LineAddress)]);
+            }
+          }
+        } else  if(in_msg.Type == RubyRequestType:FLUSH){
+			 //@hxm*************************************************************************
+             // Check for data access to blocks in I-cache and ifetchs to blocks in D-cache
+		 	 Entry L1Dcache_entry := getL1DCacheEntry(in_msg.LineAddress);
+			 if (is_valid(L1Dcache_entry)) {
+					  if(L1Dcache_entry.Dirty){
+						  trigger(Event:L1_FLUSH, in_msg.LineAddress,L1Dcache_entry, TBEs[in_msg.LineAddress]);
+					  }else{
+						  trigger(Event:L1_FLUSH_clean, in_msg.LineAddress,L1Dcache_entry,TBEs[in_msg.LineAddress]); 
+					  }		
+			 }else {
+				 // Check to see if it is in the OTHER L1
+				 Entry L1Icache_entry := getL1ICacheEntry(in_msg.LineAddress);
+				 if (is_valid(L1Icache_entry)) {
+						 if(L1Icache_entry.Dirty){
+							 trigger(Event:L1_FLUSH, in_msg.LineAddress,L1Icache_entry, TBEs[in_msg.LineAddress]);
+						 }
+						 else{ 
+							 trigger(Event:L1_FLUSH_clean, in_msg.LineAddress,L1Icache_entry, TBEs[in_msg.LineAddress]); 
+						 }
+				}else{
+					    mandatoryQueue_in.dequeue();
+					    num_writethrough := num_writethrough + 1;
+						if(sequencer.getShareAddress_num() == num_writethrough){
+							sequencer.makeLockWriteRequest();
+							num_writethrough := 0;
+						}
+						assert(num_writethrough >= 0);
+					        assert(false);
+				}
+			 }
+	    //@hxm*************************************************************************
+		} else  if(in_msg.Type == RubyRequestType:FLUSH_Transition){//flush private data
+	    //@hxm*************************************************************************
+        // Check for data access to blocks in I-cache and ifetchs to blocks in D-cache
+		
+		 	 Entry L1Dcache_entry := getL1DCacheEntry(in_msg.LineAddress);
+			 if (is_valid(L1Dcache_entry)) {
+					  if(L1Dcache_entry.Dirty){
+						  trigger(Event:L1_FLUSH_T, in_msg.LineAddress,L1Dcache_entry, TBEs[in_msg.LineAddress]);
+					  }else{
+						  trigger(Event:L1_FLUSH_T_clean, in_msg.LineAddress,L1Dcache_entry,TBEs[in_msg.LineAddress]); 
+					  }		
+			 }else {
+				 // Check to see if it is in the OTHER L1
+				 Entry L1Icache_entry := getL1ICacheEntry(in_msg.LineAddress);
+				 if (is_valid(L1Icache_entry)) {
+						 if(L1Icache_entry.Dirty){
+							 trigger(Event:L1_FLUSH_T, in_msg.LineAddress,L1Icache_entry, TBEs[in_msg.LineAddress]);
+						 }
+						 else{ 
+							 trigger(Event:L1_FLUSH_T_clean, in_msg.LineAddress,L1Icache_entry, TBEs[in_msg.LineAddress]); 
+						 }
+					}else{
+							mandatoryQueue_in.dequeue();
+							num_writethrough := num_writethrough + 1;
+						    if(sequencer.getPrivateAddress_num() == num_writethrough){
+								sequencer.flushCallback();
+								num_writethrough := 0;
+							}
+							assert(num_writethrough >= 0);
+                         				assert(false);                              
+					}
+			 }
+		//@hxm**************************************************************************************************************
+		} else{
+          // *** DATA ACCESS ***
+          Entry L1Dcache_entry := getL1DCacheEntry(in_msg.LineAddress);
+          if (is_valid(L1Dcache_entry)) {
+            // The tag matches for the L1, so the L1 ask the L2 for it
+            trigger(mandatory_request_type_to_event(in_msg.Type), in_msg.LineAddress,
+                    L1Dcache_entry, TBEs[in_msg.LineAddress]);
+          } else {		  
+            // Check to see if it is in the OTHER L1
+            Entry L1Icache_entry := getL1ICacheEntry(in_msg.LineAddress);
+            if (is_valid(L1Icache_entry)) {
+              // The block is in the wrong L1, put the request on the queue to the shared L2
+			  if(L1Icache_entry.Dirty){
+				  trigger(Event:L1_Replacement, in_msg.LineAddress,
+						  L1Icache_entry, TBEs[in_msg.LineAddress]);
+			  }else{
+				  trigger(Event:L1_Replacement_clean, in_msg.LineAddress,
+						  L1Icache_entry, TBEs[in_msg.LineAddress]); 
+			  }
+			}
+            if (L1Dcache.cacheAvail(in_msg.LineAddress)) {
+              // L1 does't have the line, but we have space for it
+              // in the L1 let's see if the L2 has it.
+              trigger(mandatory_request_type_to_event(in_msg.Type), in_msg.LineAddress,
+                      L1Dcache_entry, TBEs[in_msg.LineAddress]);
+            } else {
+			  Entry L1dcache_entry := getL1DCacheEntry(L1Dcache.cacheProbe(in_msg.LineAddress));
+              // No room in the L1, so we need to make room in the L1
+			  if(L1dcache_entry.Dirty){
+				  trigger(Event:L1_Replacement, L1Dcache.cacheProbe(in_msg.LineAddress),
+						 getL1DCacheEntry(L1Dcache.cacheProbe(in_msg.LineAddress)),
+						 TBEs[L1Dcache.cacheProbe(in_msg.LineAddress)]);
+			  }else{
+			  	  trigger(Event:L1_Replacement_clean, L1Dcache.cacheProbe(in_msg.LineAddress),
+						  getL1DCacheEntry(L1Dcache.cacheProbe(in_msg.LineAddress)),
+						  TBEs[L1Dcache.cacheProbe(in_msg.LineAddress)]); 
+			  }  
+            }
+          }
+        }
+      }
+    }
+  }
+
+  void enqueuePrefetch(Address address, RubyRequestType type) {
+      enqueue(optionalQueue_out, RubyRequest, 1) {
+          out_msg.LineAddress := address;
+          out_msg.Type := type;
+          out_msg.AccessMode := RubyAccessMode:Supervisor;
+      }
+  }
+
+  // ACTIONS
+  action(a_issueGETS, "a", desc="Issue GETS") {
+    peek(mandatoryQueue_in, RubyRequest) {
+      enqueue(requestL1Network_out, RequestMsg, l1_request_latency) {
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceRequestType:GETS;
+        out_msg.Requestor := machineID;
+        out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+        DPRINTF(RubySlicc, "address: %s, destination: %s\n",
+                address, out_msg.Destination);
+        out_msg.MessageSize := MessageSizeType:Control;
+        out_msg.Prefetch := in_msg.Prefetch;
+        out_msg.AccessMode := in_msg.AccessMode;
+      }
+    }
+  }
+
+  action(pa_issuePfGETS, "pa", desc="Issue prefetch GETS") {
+    peek(optionalQueue_in, RubyRequest) {
+      enqueue(requestL1Network_out, RequestMsg, l1_request_latency) {
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceRequestType:GETS;
+        out_msg.Requestor := machineID;
+        out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+        DPRINTF(RubySlicc, "address: %s, destination: %s\n",
+                address, out_msg.Destination);
+        out_msg.MessageSize := MessageSizeType:Control;
+        out_msg.Prefetch := in_msg.Prefetch;
+        out_msg.AccessMode := in_msg.AccessMode;
+      }
+    }
+  }
+
+  action(ai_issueGETINSTR, "ai", desc="Issue GETINSTR") {
+    peek(mandatoryQueue_in, RubyRequest) {
+      enqueue(requestL1Network_out, RequestMsg, l1_request_latency) {
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceRequestType:GET_INSTR;
+        out_msg.Requestor := machineID;
+        out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+        DPRINTF(RubySlicc, "address: %s, destination: %s\n",
+                address, out_msg.Destination);
+        out_msg.MessageSize := MessageSizeType:Control;
+        out_msg.Prefetch := in_msg.Prefetch;
+        out_msg.AccessMode := in_msg.AccessMode;
+      }
+    }
+  }
+
+  action(pai_issuePfGETINSTR, "pai",
+         desc="Issue GETINSTR for prefetch request") {
+      peek(optionalQueue_in, RubyRequest) {
+          enqueue(requestL1Network_out, RequestMsg, l1_request_latency) {
+              out_msg.Addr := address;
+              out_msg.Type := CoherenceRequestType:GET_INSTR;
+              out_msg.Requestor := machineID;
+              out_msg.Destination.add(
+                  mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+              out_msg.MessageSize := MessageSizeType:Control;
+              out_msg.Prefetch := in_msg.Prefetch;
+              out_msg.AccessMode := in_msg.AccessMode;
+
+              DPRINTF(RubySlicc, "address: %s, destination: %s\n",
+                      address, out_msg.Destination);
+          }
+      }
+  }
+
+  action(b_issueGETX, "b", desc="Issue GETX") {
+    peek(mandatoryQueue_in, RubyRequest) {
+      enqueue(requestL1Network_out, RequestMsg, l1_request_latency) {
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceRequestType:GETX;
+        out_msg.Requestor := machineID;
+        DPRINTF(RubySlicc, "%s\n", machineID);
+        out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+        DPRINTF(RubySlicc, "address: %s, destination: %s\n",
+                address, out_msg.Destination);
+        out_msg.MessageSize := MessageSizeType:Control;
+        out_msg.Prefetch := in_msg.Prefetch;
+        out_msg.AccessMode := in_msg.AccessMode;
+      }
+    }
+  }
+  
+  action(bb_issueGETX_block, "bb", desc="Issue GETX_blocked LLC blocked") {
+    peek(mandatoryQueue_in, RubyRequest) {
+      enqueue(requestL1Network_out, RequestMsg, l1_request_latency) {
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceRequestType:GETX_blocked;
+        out_msg.Requestor := machineID;
+        DPRINTF(RubySlicc, "%s\n", machineID);
+        out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+        DPRINTF(RubySlicc, "address: %s, destination: %s\n",
+                address, out_msg.Destination);
+        out_msg.MessageSize := MessageSizeType:Control;
+        out_msg.Prefetch := in_msg.Prefetch;
+        out_msg.AccessMode := in_msg.AccessMode;
+      }
+    }
+  }
+  
+  action(unub_issueWritethrough_block, "unub", desc="send data to the l2 cache LLC blocked") {
+    enqueue(requestL1Network_out, RequestMsg, l1_response_latency) {
+      assert(is_valid(cache_entry));
+      out_msg.Addr := address;
+      out_msg.Type := CoherenceRequestType:WT_blocked;
+      out_msg.DataBlk := cache_entry.DataBlk;
+      out_msg.Dirty := cache_entry.Dirty;
+      out_msg.Requestor:= machineID;
+      out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+      if (cache_entry.Dirty) {
+        out_msg.MessageSize := MessageSizeType:Writeback_Data;
+      } else {
+        out_msg.MessageSize := MessageSizeType:Writeback_Control;
+      }
+    }
+  }
+  
+  //@hxm*********************************************************************************************
+  action(bb_issueGETX_block_PDP, "bbb", desc="Issue GETX_blocked LLC blocked for PDP") {
+    peek(mandatoryQueue_in, RubyRequest) {
+      enqueue(requestL1Network_out, RequestMsg, l1_request_latency) {
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceRequestType:GETX_blocked_PDP;
+        out_msg.Requestor := machineID;
+        DPRINTF(RubySlicc, "%s\n", machineID);
+        out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+        DPRINTF(RubySlicc, "address: %s, destination: %s\n",
+                address, out_msg.Destination);
+        out_msg.MessageSize := MessageSizeType:Control;
+        out_msg.Prefetch := in_msg.Prefetch;
+        out_msg.AccessMode := in_msg.AccessMode;
+      }
+    }
+  }
+  
+  action(unub_issueWritethrough_block_PDP, "unubub", desc="send data to the l2 cache LLC blocked") {
+    enqueue(requestL1Network_out, RequestMsg, l1_response_latency) {
+      assert(is_valid(cache_entry));
+      out_msg.Addr := address;
+      out_msg.Type := CoherenceRequestType:WT_blocked_PDP;
+      out_msg.DataBlk := cache_entry.DataBlk;
+      out_msg.Dirty := cache_entry.Dirty;
+      out_msg.Requestor:= machineID;
+      out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+      if (cache_entry.Dirty) {
+        out_msg.MessageSize := MessageSizeType:Writeback_Data;
+      } else {
+        out_msg.MessageSize := MessageSizeType:Writeback_Control;
+      }
+    }
+  }
+  action(bb_issueGETX_block_PTE, "bbbb", desc="Issue GETX_blocked LLC blocked for PTE") {
+    peek(mandatoryQueue_in, RubyRequest) {
+      enqueue(requestL1Network_out, RequestMsg, l1_request_latency) {
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceRequestType:GETX_blocked_PTE;
+        out_msg.Requestor := machineID;
+        DPRINTF(RubySlicc, "%s\n", machineID);
+        out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+        DPRINTF(RubySlicc, "address: %s, destination: %s\n",
+                address, out_msg.Destination);
+        out_msg.MessageSize := MessageSizeType:Control;
+        out_msg.Prefetch := in_msg.Prefetch;
+        out_msg.AccessMode := in_msg.AccessMode;
+      }
+    }
+  }
+  
+  action(unub_issueWritethrough_block_PTE, "unububub", desc="send data to the l2 cache LLC blocked for PTE") {
+    enqueue(requestL1Network_out, RequestMsg, l1_response_latency) {
+      assert(is_valid(cache_entry));
+      out_msg.Addr := address;
+      out_msg.Type := CoherenceRequestType:WT_blocked_PTE;
+      out_msg.DataBlk := cache_entry.DataBlk;
+      out_msg.Dirty := cache_entry.Dirty;
+      out_msg.Requestor:= machineID;
+      out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+      if (cache_entry.Dirty) {
+        out_msg.MessageSize := MessageSizeType:Writeback_Data;
+      } else {
+        out_msg.MessageSize := MessageSizeType:Writeback_Control;
+      }
+    }
+  }
+  //@hxm*************************************************************************
+  action(ub_issueWritethrough_unblock, "ub", desc="send in_msg data to the L2 cache and unblock LLC") {
+		enqueue(requestL1Network_out, RequestMsg, l1_response_latency) {
+		  assert(is_valid(cache_entry));
+		  out_msg.Addr := address;
+		  out_msg.Type := CoherenceRequestType:WT_unblock;
+		  out_msg.DataBlk := cache_entry.DataBlk;
+		  out_msg.Dirty := cache_entry.Dirty;
+		  out_msg.Requestor:= machineID;
+		  out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+							  l2_select_low_bit, l2_select_num_bits, intToID(0)));
+		  if (cache_entry.Dirty) {
+			out_msg.MessageSize := MessageSizeType:Writeback_Data;
+		  } else {
+			out_msg.MessageSize := MessageSizeType:Writeback_Control;
+		  }
+		}
+	}
+  action(ur_issueWritethrough_unblockfromTBE, "ur", desc="send in_msg data to the L2 cache and unblock LLC") {
+		enqueue(requestL1Network_out, RequestMsg, l1_response_latency) {
+		  assert(is_valid(tbe));
+		  out_msg.Addr := address;
+		  out_msg.Type := CoherenceRequestType:WT_unblock;
+		  out_msg.DataBlk := tbe.DataBlk;
+		  out_msg.Dirty := tbe.Dirty;
+		  out_msg.Requestor:= machineID;
+		  out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+							  l2_select_low_bit, l2_select_num_bits, intToID(0)));
+		  if (tbe.Dirty) {
+			out_msg.MessageSize := MessageSizeType:Writeback_Data;
+		  } else {
+			out_msg.MessageSize := MessageSizeType:Writeback_Control;
+		  }
+		}
+	}
+  
+//@hxm*************************************************************************
+    action(g_issueWTX, "gwt", desc="writethrough to the L2 cache") {
+    enqueue(requestL1Network_out, RequestMsg, l1_response_latency) {
+      assert(is_valid(cache_entry));
+      out_msg.Addr := address;
+      out_msg.Type := CoherenceRequestType:WT;
+      out_msg.DataBlk := cache_entry.DataBlk;
+      out_msg.Dirty := cache_entry.Dirty;
+      out_msg.Requestor:= machineID;
+      out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+      if (cache_entry.Dirty) {
+        out_msg.MessageSize := MessageSizeType:Writeback_Data;
+      } else {
+        out_msg.MessageSize := MessageSizeType:Writeback_Control;
+      }
+    }
+  }
+//@hxm************************************************************************* 
+  action(pb_issuePfGETX, "pb", desc="Issue prefetch GETX") {
+      peek(optionalQueue_in, RubyRequest) {
+          enqueue(requestL1Network_out, RequestMsg, l1_request_latency) {
+              out_msg.Addr := address;
+              out_msg.Type := CoherenceRequestType:GETX;
+              out_msg.Requestor := machineID;
+              DPRINTF(RubySlicc, "%s\n", machineID);
+
+              out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+
+              DPRINTF(RubySlicc, "address: %s, destination: %s\n",
+                      address, out_msg.Destination);
+              out_msg.MessageSize := MessageSizeType:Control;
+              out_msg.Prefetch := in_msg.Prefetch;
+              out_msg.AccessMode := in_msg.AccessMode;
+          }
+      }
+  }
+
+  action(c_issueUPGRADE, "c", desc="Issue GETX") {
+    peek(mandatoryQueue_in, RubyRequest) {
+      enqueue(requestL1Network_out, RequestMsg, l1_request_latency) {
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceRequestType:UPGRADE;
+        out_msg.Requestor := machineID;
+        out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+        DPRINTF(RubySlicc, "address: %s, destination: %s\n",
+                address, out_msg.Destination);
+        out_msg.MessageSize := MessageSizeType:Control;
+        out_msg.Prefetch := in_msg.Prefetch;
+        out_msg.AccessMode := in_msg.AccessMode;
+      }
+    }
+  }
+
+  action(d_sendDataToRequestor, "d", desc="send data to requestor") {
+    peek(requestL1Network_in, RequestMsg) {
+      enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
+        assert(is_valid(cache_entry));
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceResponseType:DATA;
+        out_msg.DataBlk := cache_entry.DataBlk;
+        out_msg.Dirty := cache_entry.Dirty;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Response_Data;
+      }
+    }
+  }
+
+  action(d2_sendDataToL2, "d2", desc="send data to the L2 cache because of M downgrade") {
+    enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
+      assert(is_valid(cache_entry));
+      out_msg.Addr := address;
+      out_msg.Type := CoherenceResponseType:DATA;
+      out_msg.DataBlk := cache_entry.DataBlk;
+      out_msg.Dirty := cache_entry.Dirty;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+  }
+
+  action(dt_sendDataToRequestor_fromTBE, "dt", desc="send data to requestor") {
+    peek(requestL1Network_in, RequestMsg) {
+      enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
+        assert(is_valid(tbe));
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceResponseType:DATA;
+        out_msg.DataBlk := tbe.DataBlk;
+        out_msg.Dirty := tbe.Dirty;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Response_Data;
+      }
+    }
+  }
+
+  action(d2t_sendDataToL2_fromTBE, "d2t", desc="send data to the L2 cache") {
+    enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
+      assert(is_valid(tbe));
+      out_msg.Addr := address;
+      out_msg.Type := CoherenceResponseType:DATA;
+      out_msg.DataBlk := tbe.DataBlk;
+      out_msg.Dirty := tbe.Dirty;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+  }
+  
+  action(f_sendDataToL2, "f", desc="send data to the L2 cache") {
+    enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
+      assert(is_valid(cache_entry));
+      out_msg.Addr := address;
+      out_msg.Type := CoherenceResponseType:DATA;
+      out_msg.DataBlk := cache_entry.DataBlk;
+      out_msg.Dirty := cache_entry.Dirty;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+      out_msg.MessageSize := MessageSizeType:Writeback_Data;
+    }
+  }
+  //*********added by hxm 2017/04/05 for DMA start***************************************
+  action(f_sendDataToL2forDMA, "fd", desc="send data to the L2 cache for DMA") {
+    //check private or share
+		enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
+		  assert(is_valid(cache_entry));
+		  out_msg.Addr := address;
+		  out_msg.AckCount := 1;
+		  if(sequencer.checkDMAAddress(address)){//private
+			  out_msg.Type := CoherenceResponseType:DATA;
+			  out_msg.DataBlk := cache_entry.DataBlk;
+			  out_msg.Dirty := cache_entry.Dirty;
+			  out_msg.Sender := machineID;
+			  
+			  out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+								  l2_select_low_bit, l2_select_num_bits, intToID(0)));
+			  out_msg.MessageSize := MessageSizeType:Writeback_Data;
+		  }else{//share
+			  out_msg.Type := CoherenceResponseType:ACK;
+			  out_msg.Sender := machineID;
+			  out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+								  l2_select_low_bit, l2_select_num_bits, intToID(0)));
+			  out_msg.MessageSize := MessageSizeType:Response_Control;
+		  }
+	    }
+	}
+//*********added by hxm 2017/04/05 for DMA end***************************************
+  action(ft_sendDataToL2_fromTBEft_sendDataToL2_fromTBE, "ft", desc="send data to the L2 cache") {
+    enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
+      assert(is_valid(tbe));
+      out_msg.Addr := address;
+      out_msg.Type := CoherenceResponseType:DATA;
+      out_msg.DataBlk := tbe.DataBlk;
+      out_msg.Dirty := tbe.Dirty;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+      out_msg.MessageSize := MessageSizeType:Writeback_Data;
+    }
+  }
+  action(fi_sendInvAck, "fi", desc="send data to the L2 cache") {
+    peek(requestL1Network_in, RequestMsg) {
+      enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
+        out_msg.Addr := address;
+        out_msg.Type := CoherenceResponseType:ACK;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Response_Control;
+		out_msg.AckCount := 1;
+      }
+    }
+  }
+  action(forward_eviction_to_cpu, "\cc", desc="sends eviction information to the processor") {
+    if (send_evictions) {
+      DPRINTF(RubySlicc, "Sending invalidation for %s to the CPU\n", address);
+      sequencer.evictionCallback(address);
+    }
+  }
+
+  action(g_issuePUTX, "g", desc="send data to the L2 cache") {
+    enqueue(requestL1Network_out, RequestMsg, l1_response_latency) {
+      assert(is_valid(cache_entry));
+      out_msg.Addr := address;
+      out_msg.Type := CoherenceRequestType:PUTX;
+      out_msg.DataBlk := cache_entry.DataBlk;
+      out_msg.Dirty := cache_entry.Dirty;
+      out_msg.Requestor:= machineID;
+      out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+      if (cache_entry.Dirty) {
+        out_msg.MessageSize := MessageSizeType:Writeback_Data;
+      } else {
+        out_msg.MessageSize := MessageSizeType:Writeback_Control;
+      }
+    }
+  }
+
+  action(j_sendUnblock, "j", desc="send unblock to the L2 cache") {
+    enqueue(unblockNetwork_out, ResponseMsg, to_l2_latency) {
+      out_msg.Addr := address;
+      out_msg.Type := CoherenceResponseType:UNBLOCK;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+      out_msg.MessageSize := MessageSizeType:Response_Control;
+      DPRINTF(RubySlicc, "%s\n", address);
+    }
+  }
+
+  action(jj_sendExclusiveUnblock, "\j", desc="send unblock to the L2 cache") {
+    enqueue(unblockNetwork_out, ResponseMsg, to_l2_latency) {
+      out_msg.Addr := address;
+      out_msg.Type := CoherenceResponseType:EXCLUSIVE_UNBLOCK;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+      out_msg.MessageSize := MessageSizeType:Response_Control;
+      DPRINTF(RubySlicc, "%s\n", address);
+
+    }
+  }
+
+  action(dg_invalidate_sc, "dg",
+         desc="Invalidate store conditional as the cache lost permissions") {
+    sequencer.invalidateSC(address);
+  }
+
+  action(h_load_hit, "h",
+         desc="If not prefetch, notify sequencer the load completed.")
+  {
+    assert(is_valid(cache_entry));
+    DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
+    sequencer.readCallback(address, cache_entry.DataBlk);
+  }
+  
+  action(hhr_load_hitformTBE, "hhr",
+         desc="If not prefetch, notify sequencer the load completed.")
+  {
+    assert(is_valid(tbe));
+    DPRINTF(RubySlicc, "%s\n", tbe.DataBlk);
+    sequencer.readCallback(address, tbe.DataBlk);
+  }
+  
+  action(hx_load_hit, "hx",
+         desc="If not prefetch, notify sequencer the load completed.")
+  {
+    assert(is_valid(cache_entry));
+    DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
+    sequencer.readCallback(address, cache_entry.DataBlk, true);
+  }
+
+  action(hh_store_hit, "\h",
+         desc="If not prefetch, notify sequencer that store completed.")
+  {
+    assert(is_valid(cache_entry));
+    DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
+    sequencer.writeCallback(address, cache_entry.DataBlk);
+    cache_entry.Dirty := true;
+  }
+  action(hht_store_hitfromTBE, "\ht",
+         desc="If not prefetch, notify sequencer that store completed.")
+  {
+    assert(is_valid(tbe));
+    DPRINTF(RubySlicc, "%s\n", tbe.DataBlk);
+    sequencer.writeCallback(address, tbe.DataBlk);
+    tbe.Dirty := true;
+  }
+  //for llsc using
+  action(hhx_store_hit, "\hx",
+         desc="If not prefetch, notify sequencer that store completed.")
+  {
+    assert(is_valid(cache_entry));
+    DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
+    sequencer.writeCallback(address, cache_entry.DataBlk, true);
+    cache_entry.Dirty := true;
+  }
+//hxm*************************************************************************    
+  action(rsa_record_share_addr, "rsa",
+         desc="record the share data addr for flush in synchronization point.")
+  {
+    assert(is_valid(cache_entry));
+    //DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);          
+    sequencer.reordShareAddress(address);
+  } 
+  action(msa_move_share_addr, "msa",
+         desc="move the share data addr for flush in synchronization point.")
+  {
+    assert(is_valid(cache_entry));
+    DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
+    sequencer.moveShareAddress(address);
+  } 
+
+  action(mpa_move_private_addr, "mpa",
+         desc="move the private data addr for flush in synchronization point.")
+  {
+    //assert(is_valid(cache_entry));
+    DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
+    sequencer.movePrivateAddress(address);
+  } 
+  action(mpa_record_private_addr, "\pa",
+         desc="move the private data addr for flush in synchronization point.")
+  {
+    assert(is_valid(cache_entry));
+    DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
+    sequencer.reordPrivateAddress(address);
+  } 
+  
+  action(usf_updatesharenum, "usf",
+         desc="update share data addr for flush in synchronization point.")
+  {
+      num_writethrough := num_writethrough + 1;
+	  if(sequencer.getShareAddress_num() == num_writethrough){
+				sequencer.makeLockWriteRequest();
+				num_writethrough := 0;
+				++L1Dcache.demand_synchronization;
+			}
+	  assert(num_writethrough >= 0);
+  }
+  
+ action(upf_updateprivatenum, "upf",
+         desc="update private data addr for flush in transition point.")
+  {
+      num_writethrough := num_writethrough + 1;
+      if(sequencer.getPrivateAddress_num() == num_writethrough){
+			sequencer.flushCallback();
+			num_writethrough := 0;
+		}
+		assert(num_writethrough >= 0);   	
+  }
+  action(upf_updatePTEadressnum, "utf",
+         desc="update PTE data addr for flush in transition point.")
+  {
+      num_writethrough := num_writethrough + 1;
+      if(sequencer.getPTEAddress_num() == num_writethrough){
+			sequencer.PTECallback();
+			num_writethrough := 0;
+		}
+		assert(num_writethrough >= 0);   	
+  }
+//hxm*************************************************************************
+
+  action(hxm_setShare, "\hxm", desc="If not prefetch, notify sequencer that store completed and private set.")
+  {
+    assert(is_valid(cache_entry));
+    DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
+    cache_entry.Private := false;
+  }
+
+  action(i_allocateTBE, "i", desc="Allocate TBE (isPrefetch=0, number of invalidates=0)") {
+    check_allocate(TBEs);
+    assert(is_valid(cache_entry));
+    TBEs.allocate(address);
+    set_tbe(TBEs[address]);
+    tbe.isPrefetch := false;
+    tbe.Dirty := cache_entry.Dirty;
+	tbe.Private := cache_entry.Private;
+    tbe.DataBlk := cache_entry.DataBlk;
+  }
+
+  action(k_popMandatoryQueue, "k", desc="Pop mandatory queue.") {
+    mandatoryQueue_in.dequeue();
+    DPRINTF(RubySlicc, "leave PopMandatory\n");
+  }
+
+  action(l_popRequestQueue, "l",
+    desc="Pop incoming request queue and profile the delay within this virtual network") {
+    profileMsgDelay(2, requestL1Network_in.dequeue());
+  }
+
+  action(o_popIncomingResponseQueue, "o",
+    desc="Pop Incoming Response queue and profile the delay within this virtual network") {
+    profileMsgDelay(1, responseL1Network_in.dequeue());
+  }
+
+  action(s_deallocateTBE, "s", desc="Deallocate TBE") {
+    TBEs.deallocate(address);
+    unset_tbe();
+  }
+
+  action(u_writeDataToL1Cache, "u", desc="Write data to cache") {
+    peek(responseL1Network_in, ResponseMsg) {
+      assert(is_valid(cache_entry));
+      cache_entry.DataBlk := in_msg.DataBlk;
+      cache_entry.Dirty := in_msg.Dirty;
+    }
+  }
+
+  action(ff_deallocateL1CacheBlock, "\f", desc="Deallocate L1 cache block.  Sets the cache to not present, allowing a replacement in parallel with a fetch.") {
+    if (L1Dcache.isTagPresent(address)) {
+      L1Dcache.deallocate(address);
+    } else {
+      L1Icache.deallocate(address);
+    }
+    unset_cache_entry();
+  }
+//***********************for delay_WT***********************************
+action(dd_delayedwritethrough, "\dd", desc="delay write through 1000 cycle") {
+    assert(is_valid(cache_entry));
+	sequencer.startdelaywritethrough(address);//record address
+}
+action(dd_DelayWTRemove, "dd", desc="delay write through 1000 cycle") {
+    assert(is_valid(cache_entry));
+	sequencer.DelayWTRemove(address);//record address
+}
+//***********************for delay_WT***********************************
+  action(oo_allocateL1DCacheBlock, "\o", desc="Set L1 D-cache tag equal to tag of block B.") {
+    if (is_invalid(cache_entry)) {
+      set_cache_entry(L1Dcache.allocate(address, new Entry));
+    }
+  }
+  action(hoo_setDirty, "\ho",
+         desc="set cache_entry.dirt.")
+  {
+    assert(is_valid(cache_entry));
+    cache_entry.Dirty := true;
+  }
+  
+  action(hooo_resetDirty, "\hoo",
+         desc="set cache_entry.dirt.")
+  {
+    assert(is_valid(cache_entry));
+    cache_entry.Dirty := false;
+  }
+
+  action(pp_allocateL1ICacheBlock, "\p", desc="Set L1 I-cache tag equal to tag of block B.") {
+    if (is_invalid(cache_entry)) {
+      set_cache_entry(L1Icache.allocate(address, new Entry));
+    }
+  }
+
+  action(z_stallAndWaitMandatoryQueue, "\z", desc="recycle L1 request queue") {
+    stall_and_wait(mandatoryQueue_in, address);
+  }
+
+  action(kd_wakeUpDependents, "kd", desc="wake-up dependents") {
+    wakeUpBuffers(address);
+  }
+
+  action(uu_profileInstMiss, "\uim", desc="Profile the demand miss") {
+      ++L1Icache.demand_misses;
+  }
+
+  action(uu_profileInstWriteMiss, "\uwm", desc="Profile the demand write miss") {
+      ++L1Icache.demand_write_miss;
+  }
+
+  action(uu_profileInstReadMiss, "\urm", desc="Profile the demand read miss") {
+      ++L1Icache.demand_read_miss;
+  }
+ 
+  action(uu_profileInstHit, "\uih", desc="Profile the demand hit") {
+      ++L1Icache.demand_hits;
+  }
+
+  action(uu_profileDataMiss, "\udm", desc="Profile the demand miss") {
+      ++L1Dcache.demand_misses;
+  }
+
+  action(uu_profileDataWriteMiss, "\dwm", desc="Profile the demand write miss") {
+      ++L1Dcache.demand_write_miss;
+  }
+
+  action(uu_profileDataReadMiss, "\drm", desc="Profile the demand read miss") {
+      ++L1Dcache.demand_read_miss;
+  }
+ 
+  action(uu_profileDataHit, "\udh", desc="Profile the demand hit") {
+      ++L1Dcache.demand_hits;
+  }
+
+  action(po_observeMiss, "\po", desc="Inform the prefetcher about the miss") {
+      peek(mandatoryQueue_in, RubyRequest) {
+          if (enable_prefetch) {
+              prefetcher.observeMiss(in_msg.LineAddress, in_msg.Type);
+          }
+      }
+  }
+
+  action(ppm_observePfMiss, "\ppm",
+         desc="Inform the prefetcher about the partial miss") {
+      peek(mandatoryQueue_in, RubyRequest) {
+          prefetcher.observePfMiss(in_msg.LineAddress);
+      }
+  }
+
+  action(pq_popPrefetchQueue, "\pq", desc="Pop the prefetch request queue") {
+      optionalQueue_in.dequeue();
+  }
+
+  action(mp_markPrefetched, "mp", desc="Write data from response queue to cache") {
+      assert(is_valid(cache_entry));
+      cache_entry.isPrefetch := true;
+  } 
+  action(hh_store_hitPTE, "\pt",
+         desc="If not prefetch, notify sequencer that store completed.")
+  {
+    assert(is_valid(cache_entry));
+    DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
+	sequencer.checkL1cacheAddress(address,cache_entry.DataBlk,machineID);
+    sequencer.writeCallback(address, cache_entry.DataBlk);
+    cache_entry.Dirty := true;
+  }
+ 
+//******************************************************************
+// TRANSITIONS
+//****************start to find page table**************************
+//for PD and PML4 load 
+  transition({I,NP},{Locked_Read_PD,Locked_Read_PDP},I_P) {
+    oo_allocateL1DCacheBlock;
+    hoo_setDirty;
+    i_allocateTBE;
+    bb_issueGETX_block;	
+    uu_profileDataReadMiss;
+    uu_profileDataMiss;		
+    k_popMandatoryQueue;
+  } 
+  transition(V,{Locked_Read_PD,Locked_Read_PDP},I_P) {
+    hoo_setDirty;
+    i_allocateTBE;
+    unub_issueWritethrough_block;	
+    uu_profileDataReadMiss;
+    uu_profileDataMiss;		
+    k_popMandatoryQueue;
+  }   
+//for PTE load 
+  transition({I,NP},Locked_Read_PTE,I_PTE) {
+    oo_allocateL1DCacheBlock;
+    hoo_setDirty;
+    i_allocateTBE;
+    bb_issueGETX_block;	
+    uu_profileDataReadMiss;
+    uu_profileDataMiss;		
+    k_popMandatoryQueue;
+  } 
+  transition(V,Locked_Read_PTE,I_PTE) {
+    hoo_setDirty;
+    i_allocateTBE;
+    unub_issueWritethrough_block;	 
+    uu_profileDataMiss;		
+    uu_profileDataReadMiss;
+    k_popMandatoryQueue;
+  }
+  transition(I_PTE,Data_M,V_P) {
+    u_writeDataToL1Cache;
+	hh_store_hitPTE;
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+    kd_wakeUpDependents;
+  }
+//Transitions NP for DATA
+  transition(I_P,Data_M,V_P) {
+    u_writeDataToL1Cache;
+	hhx_store_hit;
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+    kd_wakeUpDependents;
+  }
+  transition(V_P,ST_Unblock,V_WT_PTE) {
+	msa_move_share_addr;
+	mpa_move_private_addr;
+	i_allocateTBE;
+	ub_issueWritethrough_unblock;
+	ff_deallocateL1CacheBlock;
+	uu_profileDataHit;
+	k_popMandatoryQueue;
+  }
+  transition(V_P_R,ST_Unblock,V_WT_PTE) {
+	ur_issueWritethrough_unblockfromTBE;
+	k_popMandatoryQueue;
+  }
+  transition(V_WT_PTE,L2_WT_Ack,I)
+  {
+  	s_deallocateTBE;
+	o_popIncomingResponseQueue;
+    upf_updatePTEadressnum;
+  }
+  transition(V_P,{L1_Replacement,L1_Replacement_clean},V_P_R){
+  	msa_move_share_addr;
+	mpa_move_private_addr;
+	i_allocateTBE;
+	ff_deallocateL1CacheBlock;
+  }
+  
+//replacement,then Locked_RMW_Write write data to L2Cache then unlocked 
+  transition(V_P_R,Locked_Write,V_WT) {
+    hht_store_hitfromTBE;
+	ur_issueWritethrough_unblockfromTBE;
+	k_popMandatoryQueue;
+  }
+//******************end of page table********************************
+
+//******************start of RMW ************************************
+  //For Lock RMW for share, this can opt
+  transition({I,NP,V},Locked_Read,I){  
+    oo_allocateL1DCacheBlock;
+	hoo_setDirty;
+	hxm_setShare; 
+    i_allocateTBE;
+    bb_issueGETX_block;	
+    uu_profileDataReadMiss;
+	uu_profileDataMiss;		
+    k_popMandatoryQueue;	  
+  }
+//Locked_RMW_Write write data to L2Cache then unlocked
+//V_P state is for page table lookfor
+  transition({V,V_P},Locked_Write,V_WT){
+    hh_store_hit;
+	i_allocateTBE;
+	msa_move_share_addr;
+	mpa_move_private_addr;
+	ub_issueWritethrough_unblock;
+	ff_deallocateL1CacheBlock;
+	uu_profileDataHit;
+	k_popMandatoryQueue;
+  }
+  transition(V_WT,L2_WT_Ack,I) {
+	s_deallocateTBE;
+	o_popIncomingResponseQueue;
+	kd_wakeUpDependents;
+  }
+//********************end of RMW*********************************
+//********************start of normal replacement****************
+//****************L1_Replacement there can be optimized**********
+  transition({I,NP},{L1_Replacement,L1_Replacement_clean},I) {
+     msa_move_share_addr;
+     mpa_move_private_addr;
+     ff_deallocateL1CacheBlock;
+  }  
+  transition(V,L1_Replacement,V_I) {
+     forward_eviction_to_cpu;
+	 msa_move_share_addr;
+	 mpa_move_private_addr;
+     i_allocateTBE;
+     g_issuePUTX;
+     ff_deallocateL1CacheBlock;
+  } 
+  transition(V,L1_Replacement_clean,I) {
+     forward_eviction_to_cpu;
+	 msa_move_share_addr;
+	 mpa_move_private_addr;
+     ff_deallocateL1CacheBlock;
+  }  
+  transition(V_I,L2_WB_Ack,I) {
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+    kd_wakeUpDependents;
+  }
+//********************end of normal replacement**************** 
+
+//********************start of DMA **************************** 
+  transition (V,Inv,I){
+	 msa_move_share_addr;
+	 mpa_move_private_addr;
+	 //maybe it is shate data,or private 	 
+	 f_sendDataToL2forDMA;
+     ff_deallocateL1CacheBlock;
+	 l_popRequestQueue;
+  }
+  transition({NP,I},Inv){
+	fi_sendInvAck;
+	l_popRequestQueue;
+  }
+  transition(V_I,Inv)
+  {
+	l_popRequestQueue;
+  }
+//********************end of DMA ********************************
+
+//********************start of share store **********************
+// Transitions NP,I for Store
+  transition({NP,I,V},Store,I_D) {
+    oo_allocateL1DCacheBlock;
+    hoo_setDirty;
+    msa_move_share_addr;
+    mpa_move_private_addr;
+    i_allocateTBE;
+    bb_issueGETX_block;
+    uu_profileDataWriteMiss;
+    uu_profileDataMiss;
+    k_popMandatoryQueue;
+  } 
+ 
+// Transitions NP for DATA
+  transition(I_D,Data_M,V_D) {
+    u_writeDataToL1Cache;
+    hhx_store_hit;
+    dd_delayedwritethrough;//record delay writethrough address,1000cycle trigger WT
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+    kd_wakeUpDependents;
+  }  
+// Transitions V_D for Store
+  transition(V_D,{Store,Store_T},V_D) {
+    hh_store_hit;
+    hoo_setDirty;
+    uu_profileDataHit;
+    k_popMandatoryQueue;
+ }
+ 
+// Transitions V_D for Store,Lock_Read and Lock_write can't interrupt
+  transition(V_D,Locked_Read,V) {
+    hh_store_hit;
+    dd_DelayWTRemove;
+    k_popMandatoryQueue;
+ }  
+// Transitions V_D for Write through
+  transition(V_D,ST_Unblock,V_WT_DELATY) {
+	msa_move_share_addr;
+	mpa_move_private_addr;
+	i_allocateTBE;
+	ub_issueWritethrough_unblock;
+	ff_deallocateL1CacheBlock;
+	uu_profileDataHit;
+	k_popMandatoryQueue;
+  }
+  transition(V_WT_DELATY,L2_WT_Ack,I)
+  {
+  	s_deallocateTBE;
+	o_popIncomingResponseQueue;
+	kd_wakeUpDependents;
+  }
+  transition(V_WT_DELATY,{Store,Locked_Read})
+  {
+	z_stallAndWaitMandatoryQueue;
+  }
+  transition(V_WT_DELATY,Load)
+  {
+    hhr_load_hitformTBE;
+    k_popMandatoryQueue;
+  }
+  transition(V_WT_DELATY,Store_T)
+  {
+    hht_store_hitfromTBE;
+    k_popMandatoryQueue;
+  }
+  transition(V_D,Load,V_D) 
+  {
+	h_load_hit;
+	uu_profileDataHit;
+	hxm_setShare;
+	k_popMandatoryQueue;
+  }
+  //because of the real address mode ,it can optional
+  transition(V_D,Load_P) 
+  {
+	h_load_hit;
+	uu_profileDataHit;
+	k_popMandatoryQueue;
+  }
+  transition(V_D,Store_P) 
+  {
+    hh_store_hit;
+	uu_profileDataHit;
+	k_popMandatoryQueue;
+  }
+  
+//******************************end of share store*********************************** 
+  transition({V_I,V_WT,I_T},{Load,L1_FLUSH, Load_P,Locked_Read_PD,Locked_Read_PDP,Locked_Read_PTE,Locked_Read,Locked_Write,Ifetch,Ifetch_P, Store,Store_P,Store_T}) {
+	z_stallAndWaitMandatoryQueue;
+  }
+ transition(I_P,{L1_Replacement,L1_Replacement_clean}) {
+	z_stallAndWaitMandatoryQueue;
+  }
+ transition(V_D,{L1_Replacement,L1_Replacement_clean}) {
+	z_stallAndWaitMandatoryQueue;
+  }
+  //load
+  //Transitions V for Load_p
+  transition(V,Load_P) {
+    h_load_hit;
+	msa_move_share_addr;
+	mpa_record_private_addr;
+	uu_profileDataHit;
+	k_popMandatoryQueue;
+  }
+  //Transitions V for Load
+  //update make it valid
+  transition(V,Load,V) {
+	h_load_hit;
+	uu_profileDataHit;
+	hxm_setShare;
+	mpa_move_private_addr;
+	rsa_record_share_addr;
+	k_popMandatoryQueue;
+  }
+//Transitions NP,I for Load_P
+  transition({I,NP},Load_P,I) {
+    oo_allocateL1DCacheBlock;
+    i_allocateTBE;
+    a_issueGETS;
+    msa_move_share_addr;
+    mpa_record_private_addr;
+    uu_profileDataMiss;
+    uu_profileDataReadMiss;
+    k_popMandatoryQueue;
+  } 
+  
+  //Transitions NP,I for Load
+  transition({I,NP},Load,I) {
+    oo_allocateL1DCacheBlock;
+    hxm_setShare;
+    mpa_move_private_addr;
+    rsa_record_share_addr;
+    i_allocateTBE;
+    a_issueGETS;
+    uu_profileDataMiss;
+    uu_profileDataReadMiss;
+    k_popMandatoryQueue;
+  }
+  
+ //IFETCH
+ //Transitions V for Ifetch_P
+  transition(V,Ifetch_P,V) {
+	h_load_hit;
+	msa_move_share_addr;//when data is private,it can be share;
+	mpa_record_private_addr;
+	uu_profileInstHit;
+	k_popMandatoryQueue;
+  }
+  
+ //Transitions V for Ifetch
+  transition(V,Ifetch,V) {
+    h_load_hit;
+	uu_profileInstHit;
+	hxm_setShare;
+	mpa_move_private_addr;
+	rsa_record_share_addr;
+	k_popMandatoryQueue;
+  }
+  
+ // Transitions I for Ifetch_P
+  transition({I,NP},Ifetch_P,I) {
+	pp_allocateL1ICacheBlock;
+	i_allocateTBE;
+	msa_move_share_addr;
+	mpa_record_private_addr;
+	ai_issueGETINSTR;
+	uu_profileInstMiss;
+    uu_profileInstReadMiss;
+	k_popMandatoryQueue;
+  } 
+  
+ // Transitions NP for Ifetch
+  transition({NP,I},Ifetch,I) {
+	pp_allocateL1ICacheBlock;
+	hxm_setShare;
+	mpa_move_private_addr;
+	rsa_record_share_addr;
+	i_allocateTBE;
+	ai_issueGETINSTR;
+	uu_profileInstMiss;
+	uu_profileInstReadMiss;
+	po_observeMiss;
+	k_popMandatoryQueue;
+  }
+  
+ // store
+ // Transitions V for Store_P
+  transition(V,Store_P) {
+    hh_store_hit;// there data is dirty
+	msa_move_share_addr;
+	mpa_record_private_addr;
+	uu_profileDataHit;
+	k_popMandatoryQueue;
+  }
+ 
+
+// Transitions NP for Store_P
+  transition({NP,I},Store_P,I) {
+	oo_allocateL1DCacheBlock;
+	hoo_setDirty;
+	msa_move_share_addr;
+	mpa_record_private_addr;
+	i_allocateTBE;
+	b_issueGETX;
+	uu_profileDataMiss;
+	uu_profileDataWriteMiss;
+	k_popMandatoryQueue;
+  } 
+
+  // Transitions NP,I for Store,there are some bug
+  // when state is V from read of share
+  transition({NP,I,V},Store_T,I_T) {
+    oo_allocateL1DCacheBlock;
+	hxm_setShare;
+	hoo_setDirty;
+	//rsa_record_share_addr;
+	i_allocateTBE;
+	b_issueGETX;
+	uu_profileDataWriteMiss;
+	uu_profileDataMiss;
+	k_popMandatoryQueue;
+  } 
+  transition(I_T,Data_M,I) {
+    u_writeDataToL1Cache;
+	hhx_store_hit;
+    msa_move_share_addr;
+	ff_deallocateL1CacheBlock;
+	s_deallocateTBE;
+	forward_eviction_to_cpu;
+    o_popIncomingResponseQueue;
+  }    
+  // Transitions NP for DATA
+  transition(I,Data_M,V) {
+    u_writeDataToL1Cache;
+	hhx_store_hit;
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+    kd_wakeUpDependents;
+  }
+    
+  // Transitions NP for DATA
+  transition(I,Data_R,V) {
+    u_writeDataToL1Cache;
+	hx_load_hit;
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+
+  }
+
+// Transitions NP for DATA
+  transition(V,L1_FLUSH,V_W) {
+     i_allocateTBE;
+     g_issueWTX;
+     ff_deallocateL1CacheBlock;
+	 k_popMandatoryQueue;
+  } 
+// Transitions NP for DATA
+  transition(V_W,L2_WT_Ack,I) {
+     mpa_move_private_addr;
+     s_deallocateTBE;
+	 o_popIncomingResponseQueue;
+	 kd_wakeUpDependents;
+	 usf_updatesharenum;
+  }
+  // Transitions NP for DATA
+  transition({I,NP},L1_FLUSH,I) {
+	 mpa_move_private_addr;
+     ff_deallocateL1CacheBlock;
+	 k_popMandatoryQueue;
+	 usf_updatesharenum;
+  }
+  
+  transition(V,L1_FLUSH_clean,I) {
+     mpa_move_private_addr;
+     ff_deallocateL1CacheBlock;
+	 k_popMandatoryQueue;
+	 usf_updatesharenum;
+  }
+  
+  // Transitions NP for DATA,private
+  transition(V,L1_FLUSH_T,V_W_T) {
+     g_issueWTX;
+	 k_popMandatoryQueue;
+  }
+  
+  // Transitions NP for DATA
+  transition(V_W_T,L2_WT_Ack,I) {
+     ff_deallocateL1CacheBlock;
+	 o_popIncomingResponseQueue;
+	 kd_wakeUpDependents;
+	 upf_updateprivatenum;
+  }
+  
+  // Transitions NP for DATA
+  transition({I,NP},L1_FLUSH_T,I) {
+     ff_deallocateL1CacheBlock;
+	 k_popMandatoryQueue;
+	 upf_updateprivatenum;
+  }
+  transition({I,NP,V},L1_FLUSH_T_clean,I) {
+     ff_deallocateL1CacheBlock;
+	 k_popMandatoryQueue;
+	 upf_updateprivatenum;
+  } 
+  
+/*transition(NP, L2_WB_Ack, NP) {
+   o_popIncomingResponseQueue;
+   kd_wakeUpDependents;
+}*/
+}
